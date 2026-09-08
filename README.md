@@ -1,16 +1,15 @@
 # AnchorHold Web Viewer
 
 Charts for boaters, in a browser. Bathymetry, side scan sonar and substrate
-over satellite imagery, tide-corrected depth on tap, and an anchor watch that
-alarms if the boat drags. Everything runs on the local machine and keeps
-working with the network down.
+over satellite imagery, tide-corrected depth, and an anchor watch that
+alarms if the boat drags (requires gps on device). Everything runs local, offline once charts are fetched
 
-Built for Santa Rosalia, Baja California Sur, from recordings made by
+Built for shallow water surveying with commercial fish finders, recordings made by
 **Shoalmark ASV** carrying a Humminbird Helix 7 MEGA SI.
 [PINGMapper](https://github.com/CameronBodine/PINGMapper) decodes the
 recording and produces the georeferenced mosaic.
 
-**[Full user guide at droneboatfleet.com](https://www.droneboatfleet.com/145-2/)**,
+**[Full user guide at droneboatfleet.com](https://www.droneboatfleet.com/anchorhold-web-viewer/)**,
 covering every stage from planning survey transects to each chart overlay.
 
 ## Chart Overlays
@@ -87,8 +86,7 @@ additionally needs `pip install pyshp`.
 - **One build chain.** Decode, tile, contour, grid and legend, producing
   MBTiles, GeoJSON, tap-to-query grids and a chart record per survey. A time
   filter left beside a recording is found and applied without being attached.
-- **Chart bundles.** One survey as one file, for a machine that did not build
-  it.
+- **Chart bundles.** Create a sharable survey bundle with overlays
 - **A workflow list** in the app, five steps with a launcher each, and counts
   read from disk rather than remembered.
 
@@ -96,7 +94,7 @@ additionally needs `pip install pyshp`.
 
 Requires [Python](https://www.python.org/downloads/) 3.10 or newer on `PATH`,
 and [Chrome](https://www.google.com/chrome/) or
-[Edge](https://www.microsoft.com/edge). Building charts additionally needs
+[Edge](https://www.microsoft.com/edge).  Opera works too. Building charts additionally needs
 PINGMapper in its own conda environment, conventionally named `ping`.
 
 ```
@@ -132,13 +130,6 @@ Each optional program is reached by path, and an environment variable
 overrides the guess: `PINGMAPPER_PYTHON`, `ROCKMAPPER_PYTHON`,
 `GHOSTVISION_PYTHON`.
 
-## Relationship to the Android App
-
-**AnchorHold** on the phone is a separate project in its own repository,
-[maxschwartziv/anchoring-app](https://github.com/maxschwartziv/anchoring-app).
-The two apps are independent, each keeps its own charts in its own format, and
-neither reads the other's. This repository contains no Android code and reads
-no Android file.
 
 ## Licence
 
