@@ -1,5 +1,5 @@
 # AnchorHold Web Viewer
-
+<img width="1232" height="692" alt="anchorhold web viewer interface" src="https://github.com/user-attachments/assets/d4a9b325-164c-43c7-95dc-c786bfccff76" /><img width="1920" height="1080" alt="shoalmark2" src="https://github.com/user-attachments/assets/d5a1fc5c-e9bf-418f-9895-727d9e4c3840" />
 Charts for boaters, in a browser. Bathymetry, side scan sonar and substrate
 over satellite imagery, tide-corrected depth, and an anchor watch that
 alarms if the boat drags (requires gps on device). Everything runs local, offline once charts are fetched
@@ -19,6 +19,8 @@ covering every stage from planning survey transects to each chart overlay.
 - **Sonar.** The side scan mosaic. Brightness, contrast and pixel smoothing
   adjust while the chart is in view, and are saved per survey.
 - **Substrate.** The PINGMapper bottom classification, with its own key. Work
+
+
   in progress.
 - **Rock.** [RockMapper](https://github.com/PINGEcosystem/RockMapper) habitat
   classes, fines through bedrock, drawn above substrate. Work in progress.
@@ -27,28 +29,6 @@ covering every stage from planning survey transects to each chart overlay.
   in progress.
 - Shallow-water shading below a chosen depth, survey outlines, tracklines and
   a pin per surveyed area, none of which need a toggle.
-
-Rows appear only for the layers a survey actually holds.
-
-## On the Water
-
-- **Tap open water** for charted depth there, tide-corrected, plus the
-  substrate class. Tap an object ring for its class, the detector's
-  confidence, the depth and the position.
-- **Anchor watch.** A circular watch with a scope suggestion taken from the
-  depth below the boat, or a custom fence drawn by hand. Alarm, test and
-  clear.
-- **Waypoints and track recording**, with long-press or right-click to drop a
-  mark.
-- **Tide readouts**, current and next high and low, where the survey has a
-  tide model. Lakes read no tide.
-- **Night mode** turns the interface red for dark adaptation.
-- **Offline.** A survey's tiles and grids cache in the browser, so the chart
-  works with the server stopped and no signal. Installs as a desktop app in
-  Chrome or Edge.
-
-The server listens on every interface, so a tablet on the same wifi opens the
-same charts from `http://<this-pc-ip>:8000/`.
 
 ## Planning a Survey
 
