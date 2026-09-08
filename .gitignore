@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+
+# Builds and recordings live outside any checkout, in the folder
+# workspace.output_dir() names. These two remain in case an older layout is
+# still in use.
+output/
+web_charts/
+
+# Packaged builds belong on the Releases page, not in git history
+dist/
+*.zip
+
+# Sample sonar and depth data. Roughly 80 MB, and regenerable from a
+# recording.
+resources/
+
+# Decode scratch space
+pingmapper/
+out/
+
+# Documentation. The user guide is published at
+# https://www.droneboatfleet.com/145-2/ and is built from the sources kept
+# outside this repository, so the copies here are working files.
+docs/
+
+# Architecture diagram and its source. Regenerate with
+# python architecture_diagram.py
+architecture.png
+architecture_diagram.py
+
+# Every Markdown file except the README at the root. The README carries what
+# is needed to run this; the guide carries the rest.
+*.md
+!/README.md
+
+# Machine-specific editor and agent settings
+.claude/settings.local.json
+.vscode/

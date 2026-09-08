@@ -1,0 +1,17 @@
+{
+  "name": "AnchorHold Web Viewer",
+  "short_name": "AnchorHold",
+  "description": "Surveyed bathymetry, sonar and substrate charts with a tide-corrected depth readout and an anchor watch.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#11202A",
+  "theme_color": "#11202A",
+  "categories": ["navigation", "utilities"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

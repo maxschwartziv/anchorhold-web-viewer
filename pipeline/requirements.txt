@@ -1,0 +1,8 @@
+numpy
+pandas
+scipy
+rasterio
+matplotlib
+mercantile
+Pillow
+requests

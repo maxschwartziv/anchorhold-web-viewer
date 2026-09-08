@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#11202A">
+<title>AnchorHold Web Viewer</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="vendor/maplibre-gl.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div id="map"></div>
+
+<!-- Top-left status stack -->
+<div id="topLeft">
+  <button id="toggleDayNight" class="chip" type="button" aria-pressed="false">&#9789; NIGHT</button>
+  <div id="navReadout" class="readout" hidden></div>
+  <pre id="devOverlay" hidden></pre>
+  <div id="anchorInfo" class="readout anchor" hidden></div>
+</div>
+
+<div id="noCharts" hidden>
+  <h2 id="noChartsTitle">No chart server</h2>
+  <p id="noChartsWhy">This page loaded, but nothing is serving the charts.</p>
+  <p class="hint">Start it on the machine holding them:
+     <code>run_web_app.bat</code>, then reload.</p>
+</div>
+
+<div id="alarmBanner" hidden>
+  <span id="alarmText">&#9888; DRAGGING &mdash; outside watch circle</span>
+  <button id="btnSilence" type="button">SILENCE</button>
+</div>
+
+<!-- Right-hand button rail -->
+<div id="rail">
+  <button id="fabGps"       class="fab primary" type="button" title="Center on GPS">&#10552;</button>
+  <button id="fabUpdate"    class="fab" type="button" title="Reload tiles">&#8635;</button>
+  <button id="fabKey"       class="fab" type="button" title="Show/hide keys">&#8505;</button>
+  <button id="fabWorkflow"  class="fab" type="button" title="Survey workflow">&#9776;</button>
+  <button id="fabSettings"  class="fab" type="button" title="Settings">&#9881;</button>
+  <button id="fabLocations" class="fab" type="button" title="Surveyed locations">&#9873;</button>
+  <button id="fabHud"       class="fab" type="button" title="Hide the HUD">&#9744;</button>
+</div>
+
+<!-- Keys -->
+<div id="legends">
+  <canvas id="depthLegend" width="94" height="240" hidden></canvas>
+  <img id="substrateLegend" alt="Substrate key" hidden>
+  <img id="rockLegend" alt="Rock key" hidden>
+</div>
+
+<!-- Bottom control panel -->
+<section id="controlPanel">
+  <div class="row layer" data-layer="bathymetry">
+    <button class="toggle on" id="toggleBathymetry" type="button">DEPTH ON</button>
+    <input class="opacity" id="seekBathymetry" type="range" min="0" max="100" value="80" aria-label="Depth opacity">
+  </div>
+  <div class="row layer" data-layer="sonar">
+    <button class="toggle" id="toggleSonar" type="button">SONAR OFF</button>
+    <input class="opacity" id="seekSonar" type="range" min="0" max="100" value="100" aria-label="Sonar opacity">
+    <button class="adjust" id="btnSonarImage" type="button" title="Adjust the sonar image">IMAGE</button>
+  </div>
+
+  <!-- Sonar image controls, in the panel rather than a dialog: you are judging
+       the mosaic while you drag, and a modal would grey out the very thing you
+       are looking at. -->
+  <div id="sonarImage" hidden>
+    <div class="row">
+      <span class="label" id="imgBrightnessLabel">Brightness: 0</span>
+      <input id="seekBrightness" type="range" min="-100" max="100" value="0"
+             aria-label="Sonar brightness">
+    </div>
+    <div class="row">
+      <span class="label" id="imgContrastLabel">Contrast: 0</span>
+      <input id="seekContrast" type="range" min="-100" max="100" value="0"
+             aria-label="Sonar contrast">
+    </div>
+    <div class="row buttons">
+      <button id="btnSharpen" type="button">SMOOTH PIXELS</button>
+      <button id="btnImageReset" type="button">RESET</button>
+    </div>
+    <p class="panel-hint" id="imageHint">Saved with this survey.</p>
+  </div>
+  <div class="row layer" data-layer="substrate">
+    <button class="toggle" id="toggleSubstrate" type="button">SUBSTRATE OFF</button>
+    <input class="opacity" id="seekSubstrate" type="range" min="0" max="100" value="80" aria-label="Substrate opacity">
+  </div>
+  <div class="row layer" data-layer="rock">
+    <button class="toggle" id="toggleRock" type="button">ROCK OFF</button>
+    <input class="opacity" id="seekRock" type="range" min="0" max="100" value="80" aria-label="Rock opacity">
+  </div>
+
+  <!-- Objects a detector found on the bottom - crab pots, from GhostVision.
+       Not a tile layer: it comes from a run made after the survey was built,
+       so the row hides itself on a chart that has never been through one. -->
+  <div class="row layer hidden" data-layer="detections">
+    <button class="toggle" id="togglePots" type="button">OBJECTS OFF</button>
+    <span class="label" id="potsCount">none</span>
+  </div>
+
+  <div class="row">
+    <span class="label" id="labelMinDepth">Min depth: off</span>
+    <input id="seekMinDepth" type="range" min="0" max="20" value="6" aria-label="Shallow-water warning">
+  </div>
+
+  <div class="row">
+    <button id="btnTideTime" type="button">DATE/TIME</button>
+    <span class="label tide" id="labelTide">&mdash;</span>
+  </div>
+
+  <div class="row buttons">
+    <button id="btnTideNow"  type="button">TIDE NOW</button>
+    <button id="btnNextHigh" type="button">NEXT HIGH</button>
+    <button id="btnNextLow"  type="button">NEXT LOW</button>
+  </div>
+
+  <div class="row buttons">
+    <button id="btnDropAnchor" type="button">DROP ANCHOR</button>
+    <button id="btnDrawFence"  type="button">DRAW</button>
+    <button id="btnTestAlarm"  type="button">TEST</button>
+    <button id="btnClearFence" type="button">CLEAR</button>
+  </div>
+
+  <div class="row buttons">
+    <button id="btnRecord" type="button">RECORD TRACK</button>
+    <button id="btnWaypoint" type="button">ADD WAYPOINT</button>
+  </div>
+</section>
+
+<!-- ── Dialogs ─────────────────────────────────────────────────────────── -->
+
+<!-- The pipeline as a checklist. The viewer is the piece already open
+     when you need the next program, and it is talking to a server on the
+     machine those programs are installed on. -->
+<dialog id="workflowDialog">
+  <h2>Survey workflow</h2>
+  <p class="hint" id="workflowHint">From planning the lines to charts on this screen.</p>
+  <ol id="workflowList"></ol>
+  <form method="dialog">
+    <menu><button value="close">Close</button></menu>
+  </form>
+</dialog>
+
+<dialog id="locationsDialog">
+  <h2>Surveyed locations</h2>
+  <ul id="locationList"></ul>
+  <form method="dialog">
+    <menu><button value="cancel">Close</button></menu>
+  </form>
+</dialog>
+
+<dialog id="sourceDialog">
+  <h2 id="sourceTitle">Survey</h2>
+  <div id="sourceBody"></div>
+  <form method="dialog">
+    <menu>
+      <button id="btnCopyCitation" type="button">Copy citation</button>
+      <button value="close">Close</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="settingsDialog">
+  <h2>Settings</h2>
+
+  <!-- Four sections, folded. Open ones are remembered, so the screen you
+       use every day is the one that opens. -->
+  <details class="group" id="grpGeneral" open>
+  <summary>Display and alarms</summary>
+
+  <label class="field">Depth units
+    <select id="setUnit">
+      <option value="m">Meters</option>
+      <option value="ft">Feet</option>
+      <option value="fa">Fathoms</option>
+    </select>
+  </label>
+
+  <label class="field" id="setScopeLabel">Default scope ratio: 5:1
+    <input id="setScope" type="range" min="2" max="10" value="5">
+  </label>
+
+  <label class="field" id="setBoatLabel">Boat length (LOA): 10 m
+    <input id="setBoat" type="range" min="3" max="30" value="10">
+  </label>
+
+  <label class="field" id="setContourLabel">Depth contours: every 1 ft
+    <input id="setContour" type="range" min="1" max="20" value="1">
+  </label>
+
+  <label class="field checkbox"><input id="setEscalate" type="checkbox"> Escalate alarm volume</label>
+  <label class="field checkbox"><input id="setCenterGps" type="checkbox"> Start centered on GPS</label>
+  <label class="field checkbox"><input id="setKeepAwake" type="checkbox" checked> Keep the screen awake on watch</label>
+  <label class="field checkbox"><input id="setPreviews" type="checkbox"> Always show survey outlines and tracks</label>
+  <label class="field checkbox"><input id="setDevData" type="checkbox"> Show developer data</label>
+  </details>
+
+  <details class="group" id="grpOffline">
+  <summary>Offline</summary>
+  <p class="hint" id="offlineState">Checking&hellip;</p>
+  <div class="offline-buttons">
+    <button id="btnSaveOffline" type="button">Save this survey offline</button>
+    <button id="btnClearOffline" type="button">Clear saved charts</button>
+  </div>
+  <button id="btnInstall" type="button" class="install" hidden>Install as a desktop app</button>
+  </details>
+
+  <details class="group" id="grpWaypoints">
+  <summary>Waypoints</summary>
+  <ul id="waypointList"></ul>
+  <p class="hint" id="waypointHint">Long-press the chart to drop one.</p>
+  </details>
+
+  <details class="group" id="grpCharts" open>
+  <summary>Charts on this computer</summary>
+  <ul id="chartList"></ul>
+  <div id="chartAdd" hidden>
+    <h4 id="availableTitle">Surveys ready to add</h4>
+    <ul id="chartAvailable"></ul>
+    <button id="btnAddChart" type="button">Add from a bundle file (.zip)</button>
+    <input id="chartFile" type="file" accept=".zip,application/zip" hidden>
+    <progress id="chartUpload" max="100" value="0" hidden></progress>
+    <p class="hint" id="chartUploadStatus" hidden></p>
+  </div>
+  <input id="detectionFile" type="file" hidden
+         accept=".geojson,.json,application/geo+json,application/json">
+  <p class="hint" id="potsStatus" hidden></p>
+  <p class="hint" id="chartsHint">Charts come from the survey pipeline.</p>
+  </details>
+
+  <form method="dialog">
+    <menu><button value="close">Done</button></menu>
+  </form>
+</dialog>
+
+<dialog id="anchorDialog">
+  <h2>Drop anchor here</h2>
+  <p id="anchorDepthLine">Depth unknown here &mdash; set the radius manually</p>
+  <label class="field" id="anchorRadiusLabel">Swing radius: 30 m
+    <input id="anchorRadius" type="range" min="5" max="150" value="30">
+  </label>
+  <form method="dialog">
+    <menu>
+      <button value="cancel">Cancel</button>
+      <button value="arm" class="primary">Arm watch</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="waypointDialog">
+  <h2>Add waypoint</h2>
+  <label class="field">Label
+    <input id="waypointLabel" type="text" placeholder="good holding, rock, …">
+  </label>
+  <form method="dialog">
+    <menu>
+      <button value="clear">Clear all</button>
+      <button value="cancel">Cancel</button>
+      <button value="save" class="primary">Save</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="timeDialog">
+  <h2>Chart time</h2>
+  <label class="field">Show depths at
+    <input id="timeInput" type="datetime-local">
+  </label>
+  <form method="dialog">
+    <menu>
+      <button value="cancel">Cancel</button>
+      <button value="set" class="primary">Set</button>
+    </menu>
+  </form>
+</dialog>
+
+<div id="toast" hidden></div>
+
+<script src="vendor/maplibre-gl.js"></script>
+<!-- No-op unless the URL carries ?selftest=1 -->
+<script src="js/selftest.js"></script>
+<script src="js/chart_url.js"></script>
+<script src="js/units.js"></script>
+<script src="js/prefs.js"></script>
+<script src="js/tide.js"></script>
+<script src="js/grid.js"></script>
+<script src="js/anchor.js"></script>
+<script src="js/legend.js"></script>
+<script src="js/source.js"></script>
+<script src="js/offline.js"></script>
+<script src="js/map.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

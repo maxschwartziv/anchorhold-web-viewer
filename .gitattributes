@@ -1,0 +1,23 @@
+# Let git normalise text in the repository, and decide line endings per type
+# on checkout.
+* text=auto
+
+# The launchers must keep CRLF. A .bat file checked out with LF can break on
+# labels and goto, which is a failure that looks like nothing at all.
+*.bat text eol=crlf
+
+# Python, web and data files are fine with LF everywhere.
+*.py   text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.webmanifest text eol=lf
+
+# Binary, never touched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.mbtiles binary
+*.zip binary

@@ -1,0 +1,652 @@
+/* AnchorHold Web Viewer — the chart HUD, laid out for a browser.
+   Day theme is a light control panel over the chart; night theme is the
+   red-on-black one, which is what you want on deck after dark. */
+
+:root {
+  --panel-bg: rgba(236, 239, 241, 0.94);
+  --panel-fg: #1a1a1a;
+  --btn-bg: #dfe4e6;
+  --btn-fg: #1a1a1a;
+  --btn-border: #b6c0c4;
+  --tide-fg: #01579b;
+  --shallow-fg: #c62828;
+  --accent: #00b381;
+  --readout-bg: rgba(0, 0, 0, 0.62);
+  --readout-fg: #ffffff;
+}
+
+body.night {
+  --panel-bg: rgba(0, 0, 0, 0.8);
+  --panel-fg: #ff5252;
+  --btn-bg: #161616;
+  --btn-fg: #ff5252;
+  --btn-border: #d50000;
+  --tide-fg: #7fe0ff;
+  --shallow-fg: #ff6b6b;
+  --readout-bg: rgba(0, 0, 0, 0.72);
+  --readout-fg: #ff8a80;
+}
+
+* { box-sizing: border-box; }
+
+/* Several elements below set display explicitly, which would otherwise beat the
+   browser's own [hidden] rule and leave them stuck on screen. */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+#map { position: absolute; inset: 0; }
+
+/* ── Top-left status stack ─────────────────────────────────────────────── */
+
+#topLeft {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  max-width: min(70vw, 520px);
+  z-index: 5;
+}
+
+.chip {
+  background: rgba(0, 0, 0, 0.62);
+  color: #ffd54f;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+.chip[aria-pressed="true"] { color: #ff8a80; }
+
+.readout {
+  background: var(--readout-bg);
+  color: var(--readout-fg);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.readout.anchor { color: #7fe0ff; }
+
+#devOverlay {
+  margin: 0;
+  background: rgba(0, 0, 0, 0.7);
+  color: #8bff6b;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  padding: 6px 8px;
+  border-radius: 4px;
+  white-space: pre;
+}
+body.night .readout.anchor { color: #ff8a80; }
+
+#alarmBanner {
+  position: absolute;
+  top: max(10px, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #d50000;
+  color: #fff;
+  font-weight: 700;
+  padding: 10px 14px;
+  border-radius: 6px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
+  animation: pulse 1s steps(2, end) infinite;
+}
+@keyframes pulse { 50% { background: #7f0000; } }
+#alarmBanner button {
+  background: #fff;
+  color: #b71c1c;
+  border: none;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* ── Right-hand rail ───────────────────────────────────────────────────── */
+
+#rail {
+  position: absolute;
+  top: max(70px, calc(env(safe-area-inset-top) + 60px));
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  z-index: 5;
+}
+
+.fab {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: none;
+  background: #00795f;
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  transition: opacity 0.15s ease;
+}
+.fab.primary { width: 56px; height: 56px; background: #00a37a; font-size: 24px; }
+.fab.dim { opacity: 0.5; }
+.fab:active { transform: scale(0.95); }
+
+/* ── Keys ──────────────────────────────────────────────────────────────── */
+
+#legends {
+  position: absolute;
+  left: 10px;
+  bottom: calc(var(--panel-height, 300px) + 12px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 4;
+  pointer-events: none;
+}
+#legends img { max-width: 42vw; max-height: 28vh; border-radius: 6px; background: rgba(255,255,255,0.93); }
+/* The key is sized here, never by the canvas attributes — legend.js only scales
+   the backing store to the device pixel ratio. Height follows the viewport so it
+   never eats the chart on a small screen. */
+#depthLegend {
+  width: 78px;
+  height: clamp(150px, 26vh, 230px);
+  border-radius: 6px;
+}
+
+/* ── Control panel ─────────────────────────────────────────────────────── */
+
+#controlPanel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  background: var(--panel-bg);
+  color: var(--panel-fg);
+  padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 52vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  backdrop-filter: blur(3px);
+}
+
+#controlPanel .row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+#controlPanel .row.buttons { flex-wrap: wrap; }
+/* A flex item never shrinks below its own text, so the basis has to be wide
+   enough that a row which cannot fit wraps instead of running off-screen. */
+#controlPanel .row.buttons button { flex: 1 1 140px; }
+#controlPanel .row.hidden { display: none; }
+
+#controlPanel button {
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  border: 1.5px solid var(--btn-border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  min-height: 40px;
+}
+#controlPanel button:active { filter: brightness(0.92); }
+#controlPanel .toggle { flex: 0 0 140px; text-align: center; white-space: nowrap; font-size: 12px; }
+#controlPanel .toggle.on { border-color: var(--accent); color: var(--accent); }
+body.night #controlPanel .toggle.on { color: #69f0ae; border-color: #69f0ae; }
+
+/* The per-layer image button sits after the slider and must not eat its width. */
+#controlPanel .adjust { flex: 0 0 auto; padding: 10px; font-size: 11px; }
+
+/* The sonar image controls, indented under the layer they belong to. They live
+   in the panel rather than a dialog on purpose: you are judging the mosaic while
+   you drag, and a modal backdrop would grey out the thing being judged. */
+#sonarImage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: 12px;
+  padding-left: 10px;
+  border-left: 2px solid var(--btn-border);
+}
+#sonarImage[hidden] { display: none; }
+#sonarImage .label { min-width: 120px; }
+.panel-hint { margin: 0; font-size: 11px; opacity: 0.75; }
+
+/* Any panel button can read as "on", not just the layer toggles. */
+#controlPanel button.on { border-color: var(--accent); color: var(--accent); }
+body.night #controlPanel button.on { color: #69f0ae; border-color: #69f0ae; }
+
+#controlPanel input[type="range"] { flex: 1; accent-color: var(--accent); min-width: 80px; }
+#controlPanel .label { font-size: 13px; font-weight: 700; min-width: 140px; }
+#controlPanel .label.tide { color: var(--tide-fg); min-width: 0; }
+/* The count wears the colour of the rings on the chart, so the switch and
+   the marks it controls read as one thing. */
+#potsCount { color: #ff4fd8; min-width: 0; }
+
+#labelMinDepth { color: var(--shallow-fg); }
+
+/* ── Dialogs ───────────────────────────────────────────────────────────── */
+
+dialog {
+  border: none;
+  border-radius: 10px;
+  padding: 18px;
+  width: min(420px, 92vw);
+  background: #12222c;
+  color: #e6eef2;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+dialog h2 { margin: 0 0 12px; font-size: 18px; color: #00e5a0; }
+dialog p { margin: 0 0 12px; font-size: 14px; line-height: 1.45; }
+dialog .hint { color: #8fa3ad; font-size: 12px; }
+dialog code { color: #b2ebf2; }
+
+.field {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #9fb4bd;
+}
+.field input[type="range"] { width: 100%; margin-top: 8px; accent-color: #00e5a0; }
+.field select,
+.field input[type="text"],
+.field input[type="datetime-local"] {
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px;
+  border-radius: 6px;
+  border: 1px solid #2b4653;
+  background: #0d1a22;
+  color: #e6eef2;
+  font-size: 14px;
+}
+.field.checkbox { display: flex; align-items: center; gap: 8px; color: #d7e3e8; }
+.field.checkbox input { accent-color: #00e5a0; width: 18px; height: 18px; }
+
+dialog menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 4px 0 0;
+  padding: 0;
+}
+dialog menu button {
+  background: #24404d;
+  color: #e6eef2;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 14px;
+  cursor: pointer;
+}
+dialog menu button.primary { background: #00a37a; color: #04231b; font-weight: 700; }
+
+dialog h3 {
+  margin: 18px 0 6px;
+  font-size: 14px;
+  color: #9fe8d3;
+  border-top: 1px solid #24404d;
+  padding-top: 14px;
+}
+.offline-buttons { display: flex; gap: 8px; margin-bottom: 10px; }
+.offline-buttons button {
+  flex: 1;
+  background: #24404d;
+  color: #e6eef2;
+  border: none;
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.offline-buttons button:disabled { opacity: 0.5; cursor: default; }
+dialog button.install {
+  width: 100%;
+  background: #00a37a;
+  color: #04231b;
+  font-weight: 700;
+  border: none;
+  border-radius: 6px;
+  padding: 11px;
+  font-size: 14px;
+  margin-bottom: 10px;
+  cursor: pointer;
+}
+
+/* The workflow checklist: one row per step, in the order they happen. */
+/* A folded settings section. The summary carries the weight the h3 used
+   to, plus a marker that says which way it will move. */
+#settingsDialog .group { border-top: 1px solid var(--btn-border); }
+#settingsDialog .group:first-of-type { border-top: none; }
+#settingsDialog .group > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 2px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+#settingsDialog .group > summary::-webkit-details-marker { display: none; }
+#settingsDialog .group > summary::before {
+  content: "\25B8";
+  color: var(--accent);
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+#settingsDialog .group[open] > summary::before { transform: rotate(90deg); }
+#settingsDialog .group > summary:hover { color: var(--accent); }
+#settingsDialog .group > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+#settingsDialog .group[open] { padding-bottom: 10px; }
+@media (prefers-reduced-motion: reduce) {
+  #settingsDialog .group > summary::before { transition: none; }
+}
+
+#workflowList { list-style: none; margin: 6px 0 14px; padding: 0; }
+
+#workflowList li {
+  display: grid;
+  grid-template-columns: 26px 1fr auto;
+  gap: 3px 10px;
+  align-items: start;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--btn-border);
+}
+#workflowList li:last-child { border-bottom: none; }
+/* Done is evidence on disk, not a claim that the work was good. */
+#workflowList .mark {
+  grid-row: span 2;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1.5px solid var(--btn-border);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+#workflowList .mark.done { border-color: #00c853; color: #00c853; }
+#workflowList .mark {
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  font-family: inherit;
+}
+#workflowList .mark:hover:not(:disabled) { border-color: var(--accent); }
+#workflowList .mark:disabled { cursor: default; opacity: 0.6; }
+#workflowList .mark:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+#workflowList .step { font-size: 14px; font-weight: 700; }
+#workflowList .what { grid-column: 2; font-size: 12px; color: #8fa3ad; }
+#workflowList .detail { grid-column: 2; font-size: 12px; color: #00e5ff; }
+#workflowList .blocked { grid-column: 2; font-size: 12px; color: #ffb300; }
+#workflowList .stepActions { grid-row: span 2; display: flex; gap: 6px; }
+#workflowList button { font-size: 12px; padding: 6px 12px; }
+/* The folder itself, monospaced and quiet - it is a fact, not a control,
+   but it copies when clicked because the next stop is a file dialog. */
+#workflowList .where {
+  grid-column: 2;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #8fa3ad;
+  cursor: pointer;
+  word-break: break-all;
+}
+#workflowList .where:hover { color: #00e5ff; }
+
+
+#locationList { list-style: none; margin: 0 0 14px; padding: 0; }
+
+#locationList li { margin-bottom: 6px; }
+#locationList button {
+  width: 100%;
+  text-align: left;
+  background: #172b36;
+  color: #e6eef2;
+  border: 1px solid #24404d;
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 15px;
+  cursor: pointer;
+}
+#locationList button.current { border-color: #00e5ff; color: #00e5ff; }
+#locationList .sub { display: block; font-size: 12px; color: #8fa3ad; margin-top: 2px; }
+/* Stands in for the list when there is nothing to list, so the dialog is
+   never a blank box. */
+#locationList li.empty {
+  display: block;
+  padding: 6px 2px 10px;
+  font-size: 14px;
+  color: #cfd8dc;
+}
+
+
+/* ── Toast ─────────────────────────────────────────────────────────────── */
+
+#toast {
+  position: absolute;
+  left: 50%;
+  bottom: calc(var(--panel-height, 300px) + 20px);
+  transform: translateX(-50%);
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.85);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 20px;
+  font-size: 14px;
+  max-width: 88vw;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* HUD hidden: chart only. The alarm banner deliberately stays. */
+body.hud-off #controlPanel,
+body.hud-off #topLeft,
+body.hud-off #legends,
+body.hud-off #rail .fab:not(#fabHud) { display: none; }
+
+/* Wide screens: the panel reads better as a column beside the chart. */
+@media (min-width: 900px) {
+  #controlPanel {
+    left: auto;
+    right: 74px;
+    bottom: 12px;
+    top: 12px;
+    width: 340px;
+    border-radius: 10px;
+    max-height: none;
+  }
+  #controlPanel .toggle { flex: 0 0 130px; }
+  #legends { bottom: 12px; }
+  #toast { bottom: 24px; }
+}
+
+.maplibregl-ctrl-attrib { font-size: 10px; }
+
+/* The scale belongs bottom-right of the chart. The control panel owns that
+   corner - the bottom of the screen when narrow, the right column when wide -
+   so the control is pushed clear of whichever it is. */
+.maplibregl-ctrl-bottom-right {
+  bottom: calc(var(--panel-height, 0px) + 4px);
+}
+@media (min-width: 900px) {
+  .maplibregl-ctrl-bottom-right { right: 366px; bottom: 4px; }
+}
+.maplibregl-ctrl-scale {
+  background: rgba(0, 0, 0, 0.6);
+  border-color: #ffffff;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* ── Survey source ─────────────────────────────────────────────────────── */
+
+/* A record reads as label-above-value: the values are sentences, not fields,
+   and wrap better with the full dialog width to themselves. */
+.sourceRow { margin-bottom: 10px; }
+.sourceLabel {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+.sourceValue { font-size: 14px; line-height: 1.35; overflow-wrap: anywhere; }
+#sourceBody { max-height: 60vh; overflow-y: auto; }
+
+/* The "i" beside each survey in the locations list. */
+#locationList li { display: flex; align-items: stretch; gap: 6px; }
+#locationList li > button:first-child { flex: 1; }
+#locationList .about {
+  flex: 0 0 auto;
+  width: 38px;
+  font-style: italic;
+  font-weight: 700;
+}
+
+/* ── Charts on this computer (Settings) ───────────────────────────────────── */
+
+#chartList, #waypointList { list-style: none; margin: 6px 0 10px; padding: 0; }
+#chartList li, #waypointList li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--btn-border);
+}
+#chartList li:last-child, #waypointList li:last-child { border-bottom: none; }
+.chartName { flex: 1; font-size: 14px; font-weight: 700; }
+/* Size and layers sit under the name, quietly - they inform the decision to
+   delete without competing with it. */
+.chartName .sub { display: block; font-size: 12px; font-weight: 400; opacity: 0.7; }
+/* Deleting is the one destructive control in Settings, so it does not look like
+   the buttons either side of it. */
+#chartList .danger {
+  flex: 0 0 auto;
+  border-color: var(--shallow-fg);
+  color: var(--shallow-fg);
+}
+#chartList .danger[disabled] { opacity: 0.5; }
+
+/* Adding a chart: one button, and the upload it starts. */
+/* Shown when there is no catalog to draw: an app with no charts looks
+   identical to a broken one, and the toast that said why has gone by the
+   time anyone reads it. */
+#noCharts {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 40;
+  max-width: 420px;
+  padding: 18px 22px;
+  border: 1px solid #2a3f4a;
+  border-radius: 10px;
+  background: rgba(9, 20, 26, 0.94);
+  text-align: center;
+}
+#noCharts h2 { margin: 0 0 8px; font-size: 17px; color: #ffb300; }
+#noCharts p { margin: 0 0 6px; font-size: 14px; color: #cfd8dc; }
+#noCharts code { color: #b2ebf2; }
+
+#chartAdd { margin: 4px 0 10px; }
+
+#chartAdd button {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #2a3f4a;
+  border-radius: 8px;
+  background: #12222b;
+  color: #00e5a0;
+  font: inherit;
+  font-weight: 700;
+}
+#chartAdd button[disabled] { opacity: 0.5; }
+#chartUpload { width: 100%; height: 6px; margin-top: 8px; }
+
+/* The surveys that could be added, and the buttons on each chart. */
+#chartAdd h4 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  color: #8fa3ad;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+#chartAvailable { list-style: none; margin: 0 0 10px; padding: 0; }
+#chartAvailable li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid #16262f;
+}
+#chartAvailable li:last-child { border-bottom: none; }
+/* The name takes the room and the button stays the size of its text: in a
+   narrow settings panel a stretched button squeezes the name into a column
+   one word wide. */
+#chartAvailable .chartName, #chartList .chartName { flex: 1; min-width: 0; }
+#chartAvailable button {
+  /* The bundle button above is full width; these are not, and share the row
+     with the name of the survey they would add. */
+  width: auto;
+  flex: 0 0 auto;
+  font-size: 12px;
+  padding: 5px 12px;
+}
+/* Five buttons will not sit beside a name in a dialog this wide, and a row
+   that could not fit them crushed the name to one word per line. Let the
+   row wrap instead: the name keeps a readable minimum and the buttons
+   follow it onto the next line only when they have to. */
+#chartList li { flex-wrap: wrap; }
+#chartList .chartName { flex: 1 1 200px; min-width: 0; }
+#chartList .chartActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+#chartList .chartActions button { font-size: 12px; padding: 5px 8px; }
+#chartList .current {
+  border-color: #00e5ff;
+  color: #00e5ff;
+}
+#chartList .behind { color: #ffb300; }
+

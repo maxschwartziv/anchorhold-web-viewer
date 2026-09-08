@@ -1,0 +1,6 @@
+# Survey Planner
+shapely>=2.0        # polygon clipping, offsets, line intersection
+numpy>=1.24
+matplotlib>=3.7     # the map view, and the Tk canvas it draws on
+scikit-image>=0.22  # least-cost routing for transits that must stay on water
+Pillow>=10.0        # stitching satellite tiles for the map underlay
