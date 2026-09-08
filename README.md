@@ -99,16 +99,6 @@ does the same without the launcher.
 `http://localhost:8000/?selftest=1` exercises the app and writes the result
 into the page title. All ten steps should report `ok`.
 
-**Recordings and builds live outside this repository**, in machine-level
-folders remembered in `%LOCALAPPDATA%\AnchorHold\workspace.json`. Builds
-default to `~/AnchorHold/output` and are set with
-`workspace.set_output_dir(path)` or `ANCHORHOLD_OUTPUT`. Recordings are set
-from step 2 of the workflow list. A checkout that already holds an `output/`
-directory with surveys in it keeps using that one.
-
-Each optional program is reached by path, and an environment variable
-overrides the guess: `PINGMAPPER_PYTHON`, `ROCKMAPPER_PYTHON`,
-`GHOSTVISION_PYTHON`.
 
 
 ## Licence
