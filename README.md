@@ -4,6 +4,9 @@ Charts for boaters, in a browser. Bathymetry, side scan sonar and substrate
 over satellite imagery, tide-corrected depth, and an anchor watch that
 alarms if the boat drags (requires gps on device). Everything runs local, offline once charts are fetched
 
+[Youtube Walkthrough (4min)](https://www.youtube.com/embed/50iO7OWWtDs)
+
+
 Built for shallow water surveying with commercial fish finders, recordings made by
 **Shoalmark ASV** carrying a Humminbird Helix 7 MEGA SI.
 [PINGMapper](https://github.com/CameronBodine/PINGMapper) decodes the
