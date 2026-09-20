@@ -102,7 +102,9 @@ does the same without the launcher.
 `http://localhost:8000/?selftest=1` exercises the app and writes the result
 into the page title. All ten steps should report `ok`.
 
+## AI assistance
 
+Assisted-by: Claude:claude-opus-5
 
 ## Licence
 
