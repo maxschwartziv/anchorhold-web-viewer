@@ -1600,6 +1600,10 @@ class LocationGUI(tk.Tk):
             side='left', fill='x', expand=True, padx=(4, 0))
         ttk.Button(btns, text="Merge...", command=self._merge).pack(
             side='left', fill='x', expand=True, padx=(4, 0))
+        # Here rather than on the bottom bar, which sits below the fold on a
+        # laptop-height window.
+        ttk.Button(left, text="Check for updates...",
+                   command=self._check_updates).pack(fill='x', pady=(6, 0))
 
         det = ttk.LabelFrame(right, text="Location", padding=10)
         det.pack(fill='both', expand=True)
@@ -1749,62 +1753,104 @@ class LocationGUI(tk.Tk):
         ttk.Label(bar, textvariable=self.var_status).pack(side='left', padx=(12, 0))
         ttk.Button(bar, text="Save locations.json", command=self._save).pack(side='right')
         ttk.Button(bar, text="Reload", command=self._load_catalog).pack(side='right', padx=(0, 6))
-        ttk.Button(bar, text="Check for updates",
-                   command=self._check_updates).pack(side='right', padx=(0, 6))
 
     # ── updates ──────────────────────────────────────────────────────────────
     def _check_updates(self):
-        """Ask GitHub and PyPI what is newer, then offer to update AnchorHold."""
+        """
+        Ask GitHub and PyPI what is newer: AnchorHold itself, then every
+        PINGEcosystem package in the PINGMapper, RockMapper and GhostVision
+        environments. Updating is offered afterwards, one decision at a time.
+        """
         def work(log, _cancel):
             app = updates.check_app(log)
-            try:
-                python = find_pingmapper_python()
-            except RuntimeError:
-                python = ''
-            ping = updates.check_pingmapper(python, log)
+            tools = updates.check_tools(updates.find_pythons({
+                'PINGMapper': PINGMAPPER_PYTHON_CANDIDATES,
+                'RockMapper': ROCKMAPPER_PYTHON_CANDIDATES,
+                'GhostVision': GHOSTVISION_PYTHON_CANDIDATES}), log)
             log('')
-            for line in updates.summary(app, ping).splitlines():
+            for line in updates.summary(app, tools).splitlines():
                 log(line)
-            return app, ping
+            return app, tools
 
         TaskDialog(self, "Checking for updates", work, self._after_update_check)
 
     def _after_update_check(self, found):
-        app, ping = found
+        app, tools = found
+        report = updates.summary(app, tools)
         if not (app['ok'] and app['behind']):
-            messagebox.showinfo("Check for updates", updates.summary(app, ping))
+            if not updates.outdated(tools):
+                messagebox.showinfo("Check for updates", report + "\n\nEverything is up to date.")
+                return
+            self._offer_tool_upgrades(tools, report)
             return
-        if app['ahead']:
-            messagebox.showwarning(
-                "Check for updates",
-                updates.summary(app, ping) + "\n\nThis copy has commits of its own "
-                "that are not on GitHub, so it cannot simply move forward. Merge "
-                "the update with git yourself.")
+        if app['ahead'] or app['blocked']:
+            why = ("This copy has commits of its own that are not on GitHub, so it "
+                   "cannot simply move forward. Merge the update with git yourself."
+                   if app['ahead'] else
+                   "These files are edited on this PC and changed in the update too, "
+                   "so git would stop:\n    " + "\n    ".join(app['blocked'])
+                   + "\n\nCommit or set those edits aside, then check again.")
+            messagebox.showwarning("Check for updates", report + "\n\n" + why)
+            self._offer_tool_upgrades(tools, None)
             return
-        if app['blocked']:
-            messagebox.showwarning(
-                "Check for updates",
-                updates.summary(app, ping) + "\n\nThese files are edited on this PC "
-                "and changed in the update too, so git would stop:\n    "
-                + "\n    ".join(app['blocked'])
-                + "\n\nCommit or set those edits aside, then check again.")
-            return
-        if not messagebox.askyesno(
-                "Check for updates",
-                updates.summary(app, ping) + "\n\nUpdate AnchorHold now?"):
+        if not messagebox.askyesno("Check for updates", report + "\n\nUpdate AnchorHold now?"):
+            self._offer_tool_upgrades(tools, None)
             return
         if self.dirty and messagebox.askyesno(
                 "Check for updates", "Save locations.json before updating?"):
             self._save()
         TaskDialog(self, "Updating AnchorHold",
                    lambda log, _cancel: updates.update_app(log),
-                   self._after_update)
+                   lambda _out: self._after_update(tools))
 
-    def _after_update(self, _output):
+    def _after_update(self, tools):
         messagebox.showinfo(
             "Check for updates",
             "AnchorHold is updated. Close and reopen Add Survey Locations to use "
             "the new version, and restart run_web_app.bat if it is running.")
+        self._offer_tool_upgrades(tools, None)
+
+    def _offer_tool_upgrades(self, tools, report):
+        """
+        Offer pip upgrades for the tools that are behind, each in its own
+        environment. `report` is shown first when nothing else has shown it.
+        """
+        behind = updates.outdated(tools)
+        if not behind:
+            return
+        lines = []
+        for tool in behind:
+            names = [f"{p['name']} {p['installed']} -> {p['latest']}"
+                     for p in tool['packages'] if p['newer']]
+            lines.append(f"{tool['tool']}: " + ", ".join(names))
+        note = ""
+        if any(t['tool'] == 'PINGMapper' or
+               any(p['name'] == 'pingmapper' and p['newer'] for p in t['packages'])
+               for t in behind):
+            note = ("\n\nA new PINGMapper can change what the pipeline works "
+                    "around (the small-chunk fix in depth_csv_from_sonar.py). "
+                    "Build a known survey afterwards to check it.")
+        question = ((report + "\n\n") if report else "") + \
+            "Upgrade these now? pip runs in each tool's own environment:\n    " + \
+            "\n    ".join(lines) + note
+        if not messagebox.askyesno("Check for updates", question):
+            by_hand = "\n".join(updates.upgrade_command(t) for t in behind)
+            messagebox.showinfo("Check for updates",
+                                "To upgrade later, run:\n\n" + by_hand)
+            return
+
+        def work(log, cancel):
+            for tool in behind:
+                if cancel.is_set():
+                    raise RuntimeError("Stopped by user")
+                updates.upgrade_tool(tool, log)
+                log('')
+            return [t['tool'] for t in behind]
+
+        TaskDialog(self, "Upgrading sonar tools", work,
+                   lambda done: messagebox.showinfo(
+                       "Check for updates",
+                       "Upgraded: " + ", ".join(done) + ". The next build uses them."))
 
     # ── catalog ──────────────────────────────────────────────────────────────
     def _load_catalog(self):
