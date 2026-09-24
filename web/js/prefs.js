@@ -20,6 +20,10 @@ const Prefs = (() => {
     // one for a side-scan sheet - one global setting would be re-dialled on
     // every switch. { <id>: { brightness, contrast, sharp } }, -100..100 each.
     sonarImage: {},
+    // The down sonar waterfall's depth window and tone, per survey the same
+    // way: { <id>: { top, bottom, brightness, contrast, sharp } }, depths in
+    // metres (bottom null = all of it), tone -100..100.
+    downImage: {},
     // Which settings sections are folded open. Remembered because the one
     // you use every day should be the one that opens.
     settingsOpen: { grpGeneral: true, grpOffline: false,

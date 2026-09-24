@@ -63,6 +63,7 @@
     }
     applySonarImage();
     refreshImageSection();
+    refreshDownImageSection();
     // Contours belong to the bathymetry chart, so they follow its toggle.
     const bathyOn = Prefs.bathyOn && ChartMap.hasLayer('bathymetry');
     ChartMap.setVisible('contours-layer', bathyOn);
@@ -103,7 +104,6 @@
     $('toggleDown').classList.toggle('on', downOn);
     $('toggleDown').textContent = downOn ? 'DOWN ON' : 'DOWN OFF';
     $('downLabel').textContent = DownScan.label;
-    $('btnDownView').classList.toggle('on', DownScan.isOpen);
     measurePanel();
   }
 
@@ -183,6 +183,107 @@
       setImageSetting({ ...IMAGE_DEFAULTS }));
   }
 
+  // ── The down sonar image ───────────────────────────────────────────────────
+  //
+  // The same idea as the mosaic's: per survey, in the panel, applied while you
+  // drag. Plus a depth window, because a sounder set deep over shallow water
+  // spends most of its picture on nothing, and the interesting metre is the
+  // one just above the bottom.
+
+  const DOWN_DEFAULTS = { top: 0, bottom: null, brightness: 0, contrast: 0, sharp: false };
+  let downImageOpen = false;
+
+  function downImageSettings() {
+    const saved = (Prefs.downImage || {})[location && location.id] || {};
+    return { ...DOWN_DEFAULTS, ...saved };
+  }
+
+  function setDownImageSetting(changes) {
+    if (!location) return;
+    Prefs.downImage = {
+      ...(Prefs.downImage || {}),
+      [location.id]: { ...downImageSettings(), ...changes },
+    };
+    applyDownImage();
+    refreshDownImagePanel();
+  }
+
+  function applyDownImage() {
+    const look = downImageSettings();
+    DownScan.setLook({
+      top: look.top, bottom: look.bottom, sharp: look.sharp,
+      brightness: look.brightness / 100, contrast: look.contrast / 100,
+    });
+  }
+
+  /** Slider positions are thousandths of the recorded range. */
+  function refreshDownImagePanel() {
+    const look = downImageSettings();
+    const range = DownScan.rangeM || 1;
+    const bottom = look.bottom === null ? range : look.bottom;
+    const sign = v => (v > 0 ? `+${v}` : `${v}`);
+    $('downTopLabel').textContent = `Top: ${Units.depth(look.top, Prefs.depthUnit)}`;
+    $('downBottomLabel').textContent = look.bottom === null
+      ? `Bottom: all (${Units.depth(range, Prefs.depthUnit)})`
+      : `Bottom: ${Units.depth(bottom, Prefs.depthUnit)}`;
+    $('seekDownTop').value = Math.round((look.top / range) * 1000);
+    $('seekDownBottom').value = Math.round((bottom / range) * 1000);
+    $('downBrightnessLabel').textContent = `Brightness: ${sign(look.brightness)}`;
+    $('downContrastLabel').textContent = `Contrast: ${sign(look.contrast)}`;
+    $('seekDownBrightness').value = look.brightness;
+    $('seekDownContrast').value = look.contrast;
+    $('btnDownSharpen').classList.toggle('on', look.sharp);
+    $('btnDownSharpen').textContent = look.sharp ? 'SHARP PIXELS' : 'SMOOTH PIXELS';
+    $('downImageHint').textContent = location
+      ? `Saved with ${location.name}.` : 'Saved with this survey.';
+  }
+
+  function refreshDownImageSection() {
+    const open = downImageOpen && Prefs.downOn && DownScan.available;
+    $('downImage').hidden = !open;
+    $('btnDownImage').classList.toggle('on', open);
+    refreshDownImagePanel();
+    measurePanel();
+  }
+
+  function wireDownImagePanel() {
+    // Half a metre is the least window worth drawing; the two sliders push
+    // each other rather than cross.
+    const GAP = 0.5;
+    const metres = value => (Number(value) / 1000) * (DownScan.rangeM || 0);
+    $('btnDownImage').addEventListener('click', () => {
+      downImageOpen = !downImageOpen;
+      // Adjusting the image of a waterfall you cannot see is no use.
+      if (downImageOpen && !Prefs.downOn) {
+        Prefs.downOn = true;
+        DownScan.show();
+      }
+      applyControlsToChart();
+    });
+    $('seekDownTop').addEventListener('input', e => {
+      const look = downImageSettings();
+      const bottom = look.bottom === null ? DownScan.rangeM : look.bottom;
+      const top = Math.min(metres(e.target.value), Math.max(0, bottom - GAP));
+      setDownImageSetting({ top: Math.round(top * 100) / 100 });
+    });
+    $('seekDownBottom').addEventListener('input', e => {
+      const look = downImageSettings();
+      const value = metres(e.target.value);
+      // All the way down means "all of it", which follows a rebuilt survey.
+      const bottom = Number(e.target.value) >= 1000 ? null
+        : Math.max(value, look.top + GAP);
+      setDownImageSetting({ bottom: bottom === null ? null : Math.round(bottom * 100) / 100 });
+    });
+    $('seekDownBrightness').addEventListener('input', e =>
+      setDownImageSetting({ brightness: Number(e.target.value) }));
+    $('seekDownContrast').addEventListener('input', e =>
+      setDownImageSetting({ contrast: Number(e.target.value) }));
+    $('btnDownSharpen').addEventListener('click', () =>
+      setDownImageSetting({ sharp: !downImageSettings().sharp }));
+    $('btnDownImageReset').addEventListener('click', () =>
+      setDownImageSetting({ ...DOWN_DEFAULTS }));
+  }
+
   function updateLegends() {
     const show = Prefs.keyVisible && Prefs.hudVisible;
     const depthOn = show && Prefs.bathyOn && ChartMap.hasLayer('bathymetry');
@@ -254,7 +355,11 @@
       applyControlsToChart();
     });
     // Same again for the down sonar: its row appears once the index is in.
-    DownScan.load(target).then(applyControlsToChart);
+    DownScan.load(target).then(() => {
+      applyDownImage();
+      if (Prefs.downOn && DownScan.available) DownScan.show();
+      applyControlsToChart();
+    });
   }
 
   async function loadOverlay(target, key, apply) {
@@ -1258,23 +1363,17 @@
       Prefs.potsOn = !Prefs.potsOn;
       applyControlsToChart();
     });
+    // DOWN is the waterfall and its line together: on shows both, off
+    // hides both, and closing the waterfall is the same as switching it off.
     $('toggleDown').addEventListener('click', () => {
       Prefs.downOn = !Prefs.downOn;
-      if (!Prefs.downOn) DownScan.close();
+      if (Prefs.downOn) DownScan.show(); else DownScan.close();
       applyControlsToChart();
     });
-    // VIEW opens the waterfall where it last was; switching the line on as
-    // well, since a cursor moving along a track you cannot see is no help.
-    $('btnDownView').addEventListener('click', () => {
-      if (DownScan.isOpen) {
-        DownScan.close();
-      } else {
-        Prefs.downOn = true;
-        DownScan.show();
-      }
+    $('btnDownClose').addEventListener('click', () => {
+      Prefs.downOn = false;
       applyControlsToChart();
     });
-    $('btnDownClose').addEventListener('click', refreshLayerButtons);
   }
 
   function wireTide() {
@@ -1527,6 +1626,7 @@
       Prefs.depthUnit = e.target.value;
       recomputeTide();
       updateLegends();
+      refreshDownImagePanel();
       DownScan.render();
       if (AnchorWatch.lastFix) onFix(AnchorWatch.lastFix, !AnchorWatch.isBreached);
     });
@@ -1620,6 +1720,7 @@
     DownScan.wire();
     wireLayerRows();
     wireImagePanel();
+    wireDownImagePanel();
     wireTide();
     wireAnchor();
     wireRail();

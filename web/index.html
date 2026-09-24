@@ -108,7 +108,37 @@
   <div class="row layer hidden" data-layer="downscan">
     <button class="toggle" id="toggleDown" type="button">DOWN OFF</button>
     <span class="label" id="downLabel">200 kHz down</span>
-    <button class="adjust" id="btnDownView" type="button" title="Show the down sonar waterfall">VIEW</button>
+    <button class="adjust" id="btnDownImage" type="button" title="Adjust the down sonar image">IMAGE</button>
+  </div>
+
+  <!-- The waterfall's depth window and tone, in the panel like the sonar's:
+       you are looking at the waterfall while you drag these. -->
+  <div id="downImage" class="image-controls" hidden>
+    <div class="row">
+      <span class="label" id="downTopLabel">Top: 0 ft</span>
+      <input id="seekDownTop" type="range" min="0" max="1000" value="0" step="1"
+             aria-label="Shallowest depth shown">
+    </div>
+    <div class="row">
+      <span class="label" id="downBottomLabel">Bottom: all</span>
+      <input id="seekDownBottom" type="range" min="0" max="1000" value="1000" step="1"
+             aria-label="Deepest depth shown">
+    </div>
+    <div class="row">
+      <span class="label" id="downBrightnessLabel">Brightness: 0</span>
+      <input id="seekDownBrightness" type="range" min="-100" max="100" value="0"
+             aria-label="Down sonar brightness">
+    </div>
+    <div class="row">
+      <span class="label" id="downContrastLabel">Contrast: 0</span>
+      <input id="seekDownContrast" type="range" min="-100" max="100" value="0"
+             aria-label="Down sonar contrast">
+    </div>
+    <div class="row buttons">
+      <button id="btnDownSharpen" type="button">SMOOTH PIXELS</button>
+      <button id="btnDownImageReset" type="button">RESET</button>
+    </div>
+    <p class="panel-hint" id="downImageHint">Saved with this survey.</p>
   </div>
 
   <div class="row">

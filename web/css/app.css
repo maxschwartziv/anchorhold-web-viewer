@@ -228,7 +228,7 @@ body.night #controlPanel .toggle.on { color: #69f0ae; border-color: #69f0ae; }
 /* The sonar image controls, indented under the layer they belong to. They live
    in the panel rather than a dialog on purpose: you are judging the mosaic while
    you drag, and a modal backdrop would grey out the thing being judged. */
-#sonarImage {
+#sonarImage, #downImage {
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -236,8 +236,17 @@ body.night #controlPanel .toggle.on { color: #69f0ae; border-color: #69f0ae; }
   padding-left: 10px;
   border-left: 2px solid var(--btn-border);
 }
-#sonarImage[hidden] { display: none; }
-#sonarImage .label { min-width: 120px; }
+#sonarImage[hidden], #downImage[hidden] { display: none; }
+#sonarImage .label, #downImage .label { min-width: 120px; }
+/* The channel name gives way before the IMAGE button does: at 140 px it
+   pushed the button out past the panel's edge. */
+#controlPanel #downLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .panel-hint { margin: 0; font-size: 11px; opacity: 0.75; }
 
 /* Any panel button can read as "on", not just the layer toggles. */
