@@ -48,6 +48,9 @@ const DownScan = (() => {
   let measuring = false;     // the measure tool is on: drags mark, not scroll
   let measureA = null;       // the two pings a measurement runs between
   let measureB = null;
+  // How the waterfall is drawn, set from the IMAGE controls: the depth window
+  // shown (bottom null = everything recorded) and the tone. -1..1 for tone.
+  let look = { top: 0, bottom: null, brightness: 0, contrast: 0, sharp: false };
   let frame = 0;
 
   // ── Data ───────────────────────────────────────────────────────────────────
@@ -309,16 +312,24 @@ const DownScan = (() => {
     const first = Math.max(0, Math.floor(centre - W / 2 / ppp));
     const last = Math.min(index.count, Math.ceil(centre + W / 2 / ppp) + 1);
     if (image) {
-      ctx.imageSmoothingEnabled = zoom < 1;
+      // Only the rows inside the depth window are drawn, stretched to the
+      // full height - which is what zooming in on the bottom means here.
+      const [top, bottom] = window_();
+      const rowTop = top / index.metresPerRow;
+      const rowSpan = Math.max(1, (bottom - top) / index.metresPerRow);
+      ctx.imageSmoothingEnabled = !look.sharp;
+      // Tone on the echogram only; the scale and marks drawn after stay crisp.
+      ctx.filter = `brightness(${1 + look.brightness}) contrast(${1 + look.contrast})`;
       const sw = index.stripWidth;
       for (let p = first; p < last;) {
         const strip = Math.floor(p / sw);
         const end = Math.min(last, (strip + 1) * sw);
         ctx.drawImage(image,
-          p - strip * sw, strip * index.rows, end - p, index.rows,
+          p - strip * sw, strip * index.rows + rowTop, end - p, rowSpan,
           W / 2 + (p - centre) * ppp, 0, (end - p) * ppp, H);
         p = end;
       }
+      ctx.filter = 'none';
       if (document.body.classList.contains('night')) {
         ctx.globalCompositeOperation = 'multiply';
         ctx.fillStyle = '#ff2a1a';
@@ -422,24 +433,34 @@ const DownScan = (() => {
   }
 
   /** Depth ticks down the left edge, in whatever unit the chart is in. */
+  /** The depth window in metres: [top, bottom], always inside what was recorded. */
+  function window_() {
+    const range = index.rangeM;
+    const bottom = look.bottom === null ? range : Math.min(range, Math.max(0.1, look.bottom));
+    const top = Math.max(0, Math.min(bottom - 0.1, look.top || 0));
+    return [top, bottom];
+  }
+
   function drawScale(ctx, W, H, ratio) {
     const unit = Prefs.depthUnit;
     const perMetre = unit === 'ft' ? 3.28084 : unit === 'fa' ? 1 / 1.8288 : 1;
-    const span = index.rangeM * perMetre;
-    const steps = [0.5, 1, 2, 5, 10, 20, 50, 100];
+    const [topM, bottomM] = window_();
+    const top = topM * perMetre;
+    const span = (bottomM - topM) * perMetre;
+    const steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100];
     const step = steps.find(s => span / s <= 8) || 100;
     const suffix = unit === 'ft' ? ' ft' : unit === 'fa' ? ' fa' : ' m';
     ctx.font = `${11 * ratio}px system-ui, sans-serif`;
     ctx.textBaseline = 'middle';
-    for (let v = step; v < span; v += step) {
-      const y = Math.round((v / span) * H) + 0.5;
+    for (let v = Math.floor(top / step) * step + step; v < top + span; v += step) {
+      const y = Math.round(((v - top) / span) * H) + 0.5;
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(10 * ratio, y);
       ctx.stroke();
-      const text = `${v}${suffix}`;
+      const text = `${+v.toFixed(1)}${suffix}`;
       ctx.lineWidth = 3 * ratio;
       ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)';
       ctx.strokeText(text, 13 * ratio, y);
@@ -470,7 +491,8 @@ const DownScan = (() => {
     if (index.depth[i] > 0) parts.push(`bottom ${Units.depth(index.depth[i], unit)}`);
     if (hoverY !== null) {
       const h = $('downCanvas').clientHeight;
-      parts.push(`at ${Units.depth((hoverY / h) * index.rangeM, unit)}`);
+      const [top, bottom] = window_();
+      parts.push(`at ${Units.depth(top + (hoverY / h) * (bottom - top), unit)}`);
     }
     $('downReadout').textContent = parts.join('  •  ');
   }
@@ -552,6 +574,13 @@ const DownScan = (() => {
     get available() { return Boolean(index); },
     get isOpen() { return open; },
     get label() { return index ? index.label : ''; },
+    /** Metres of water the waterfall holds - the most the depth window can show. */
+    get rangeM() { return index ? index.rangeM : 0; },
+    /** Draw with these settings: { top, bottom, brightness, contrast, sharp }. */
+    setLook(next) {
+      look = { ...look, ...next };
+      render();
+    },
     /** For the self-test: where the waterfall is looking. */
     get centre() { return Math.round(centre); },
   };
