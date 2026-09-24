@@ -402,10 +402,68 @@ def _teach_pingmapper_logger_to_be_a_stream():
         logger.fileno = fileno
 
 
+# A chunk left with fewer pings than this is folded into the one before it.
+MIN_CHUNK_PINGS = 10
+
+
+def _fold_sliver_chunks_into_their_neighbours():
+    """
+    Stop PINGMapper cutting a transect into a chunk of one or two pings.
+
+    PINGMapper splits each transect into chunks of nchunk (500) pings and
+    gives the remainder a chunk of its own, however small. A transect of 1501
+    pings ends in a one-ping chunk, and the rubber-sheet rectifier then asks
+    qhull to triangulate two points - "QH6214 not enough points to construct
+    initial simplex" - and the whole decode fails with nothing to show for
+    it. Whether a recording hits this depends only on where its filters
+    happen to break the track.
+
+    The remainder is folded into the chunk before it in the same transect, so
+    that chunk runs to at most nchunk + MIN_CHUNK_PINGS - 1 pings. Every ping
+    is kept. Chunk numbers stay consecutive: everything after the fold moves
+    down by one, which is what PINGMapper would have numbered them had the
+    sliver never existed. Harmless if PINGMapper fixes it upstream: with no
+    sliver to fold, nothing changes.
+    """
+    try:
+        from pingmapper.class_sonObj import sonObj
+    except ImportError:
+        return
+    original = sonObj._reassignChunks
+    if getattr(original, '_folds_slivers', False):
+        return
+
+    def reassign(self, sonDF):
+        sonDF = original(self, sonDF)
+        if sonDF.empty or 'chunk_id' not in sonDF or 'transect' not in sonDF:
+            return sonDF
+        sizes = sonDF.groupby('chunk_id').size()
+        first_of_transect = sonDF.groupby('transect')['chunk_id'].min()
+        renumber = {}
+        shift = 0
+        for chunk in sorted(sizes.index):
+            transect = sonDF.loc[sonDF['chunk_id'] == chunk, 'transect'].iloc[0]
+            if (sizes[chunk] < MIN_CHUNK_PINGS
+                    and chunk != first_of_transect[transect]):
+                shift += 1
+                renumber[chunk] = chunk - shift        # the previous chunk's new id
+            else:
+                renumber[chunk] = chunk - shift
+        if shift:
+            print(f"  (folded {shift} chunk(s) of under {MIN_CHUNK_PINGS} pings "
+                  "into the chunk before - PINGMapper cannot rectify them)")
+            sonDF['chunk_id'] = sonDF['chunk_id'].map(renumber).astype('int64')
+        return sonDF
+
+    reassign._folds_slivers = True
+    sonObj._reassignChunks = reassign
+
+
 def run_pingmapper(args, project_dir):
     from pingmapper.doWork import doWork
 
     _teach_pingmapper_logger_to_be_a_stream()
+    _fold_sliver_chunks_into_their_neighbours()
 
     params = depth_only_params(args)
     recording = os.path.abspath(args.recording)

@@ -36,6 +36,8 @@ import threading
 import time
 
 import chart_bundle              # packs a built survey into one file
+import down_sonar                # the down beam as a waterfall along the track
+import updates                   # newer AnchorHold on GitHub, newer PINGMapper
 import merge_locations
 import workspace                 # the recordings folder, set once
 import appicon                   # the window icon, on every window
@@ -100,7 +102,7 @@ GHOSTVISION_PYTHON_CANDIDATES = [
 GRID_FILES = ['depth_grid.bin', 'depth_grid.json',
               'substrate_grid.bin', 'substrate_grid.json',
               'contours.geojson', 'shallow_bands.geojson',
-              'detections.geojson']
+              'detections.geojson', 'downscan.json', 'downscan.png']
 TILE_FILES = ['bathymetry.mbtiles', 'sonar.mbtiles', 'substrate.mbtiles', 'rock.mbtiles']
 # Kilobyte-sized, and what an un-downloaded survey shows on the map, so these
 # ride in the app itself rather than in the survey's on-demand pack.
@@ -650,6 +652,11 @@ def conda_env_environment(python_exe):
         env['PROJ_LIB'] = proj_data
         env['PROJ_DATA'] = proj_data
     env['CONDA_PREFIX'] = env_root
+    # tqdm draws its bars in block characters. Unless the child is told to
+    # write UTF-8 and this side reads it as such, Windows' codepage turns
+    # every block into "â–ˆ" and the log fills with mojibake.
+    env['PYTHONIOENCODING'] = 'utf-8'
+    env['PYTHONUTF8'] = '1'
     return env
 
 
@@ -706,7 +713,8 @@ def run_pingmapper_products(recording, out_dir, log, cancel,
     log("  " + " ".join(cmd) + "\n")
     proc = subprocess.Popen(cmd, cwd=repo_dir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1,
-                            errors='replace', env=conda_env_environment(python))
+                            encoding='utf-8', errors='replace',
+                            env=conda_env_environment(python))
     try:
         for line in proc.stdout:
             log(line.rstrip())
@@ -819,7 +827,8 @@ def run_ghost_vision(recording, out_dir, project, log, cancel, processing=None):
     log("  " + " ".join(cmd) + chr(10))
     proc = subprocess.Popen(cmd, cwd=repo_dir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1,
-                            errors='replace', env=conda_env_environment(python))
+                            encoding='utf-8', errors='replace',
+                            env=conda_env_environment(python))
     try:
         for line in proc.stdout:
             log(line.rstrip())
@@ -878,7 +887,8 @@ def run_rock_map(sonar_files, out_dir, project, log, cancel, epsg=0,
     log("  " + " ".join(cmd) + "\n")
     proc = subprocess.Popen(cmd, cwd=repo_dir, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, bufsize=1,
-                            errors='replace', env=conda_env_environment(python))
+                            encoding='utf-8', errors='replace',
+                            env=conda_env_environment(python))
     try:
         for line in proc.stdout:
             log(line.rstrip())
@@ -1039,7 +1049,8 @@ def combine_entries(entries, name, out_root, log=print):
         'tide': dict(first.get('tide') or {'mode': 'none'}),
         'zoom': first.get('zoom', DEFAULT_ZOOM),
         # Everything is already made; Build just tiles it.
-        'generate': {'sonar': False, 'substrate': False, 'rock': False},
+        'generate': {'sonar': False, 'substrate': False, 'rock': False,
+                     'down': False},
         'inputs': {'recording': '', 'csv': merged_csv,
                    'substrate': substrate, 'sonar': sonar},
         'combinedFrom': [e['id'] for e in entries],
@@ -1063,7 +1074,7 @@ def blank_entry(name='New location'):
         'waterTempC': DEFAULT_WATER_TEMP,
         'tide': {'mode': 'none'},   # safe default: no tide until proven otherwise
         'generate': {'sonar': False, 'substrate': False, 'rock': False,
-                     'ghost': False},
+                     'ghost': False, 'down': True},
         'processing': default_processing(),
         'inputs': {'recording': '', 'csv': '', 'substrate': '', 'sonar': []},
         'tiles': {},
@@ -1541,6 +1552,7 @@ class LocationGUI(tk.Tk):
         self.var_make_substrate = tk.BooleanVar(value=False)
         self.var_make_rock = tk.BooleanVar(value=False)
         self.var_make_ghost = tk.BooleanVar(value=False)
+        self.var_make_down = tk.BooleanVar(value=True)
         # How each stage is run: mosaic tone, which pings the imagery keeps,
         # how substrate is classified, how finely rock is predicted. The
         # values live here; the buttons only show which preset they amount to.
@@ -1552,8 +1564,10 @@ class LocationGUI(tk.Tk):
         self.var_tz = tk.StringVar(value=DEFAULT_TIMEZONE)
         self.var_lat = tk.StringVar()
         self.var_lon = tk.StringVar()
-        self.var_zoom_min = tk.StringVar(value='12')
-        self.var_zoom_max = tk.StringVar(value='17')
+        # Worked out from the recording unless a number is typed: out to where
+        # the survey still shows, in to where each layer's pixels run out.
+        self.var_zoom_min = tk.StringVar(value='lowest')
+        self.var_zoom_max = tk.StringVar(value='highest')
         self.var_default = tk.BooleanVar(value=False)
         self.var_installed = tk.StringVar(value='')
         self.var_status = tk.StringVar(value='')
@@ -1618,6 +1632,8 @@ class LocationGUI(tk.Tk):
         layers.pack(fill='x')
         ttk.Checkbutton(layers, text="Depth map (always)", state='disabled',
                         variable=tk.BooleanVar(value=True)).pack(side='left')
+        ttk.Checkbutton(layers, text="Down sonar", variable=self.var_make_down,
+                        command=self._on_generate_toggled).pack(side='left', padx=(12, 0))
         ttk.Checkbutton(layers, text="Side scan mosaic", variable=self.var_make_sonar,
                         command=self._on_generate_toggled).pack(side='left', padx=(12, 0))
         ttk.Checkbutton(layers, text="Substrate map", variable=self.var_make_substrate,
@@ -1664,9 +1680,15 @@ class LocationGUI(tk.Tk):
         opts = ttk.Frame(det)
         opts.grid(row=r, column=0, columnspan=3, sticky='ew')
         ttk.Label(opts, text="Tile zooms").pack(side='left')
-        ttk.Entry(opts, textvariable=self.var_zoom_min, width=4).pack(side='left', padx=(4, 2))
+        # 'lowest' lets the build work the first zoom out from the survey's
+        # size: as far out as it still shows. A number still types in.
+        ttk.Combobox(opts, textvariable=self.var_zoom_min, width=7,
+                     values=['lowest'] + [str(z) for z in range(0, 23)]).pack(
+            side='left', padx=(4, 2))
         ttk.Label(opts, text="to").pack(side='left')
-        ttk.Entry(opts, textvariable=self.var_zoom_max, width=4).pack(side='left', padx=(2, 12))
+        ttk.Combobox(opts, textvariable=self.var_zoom_max, width=7,
+                     values=['highest'] + [str(z) for z in range(0, 23)]).pack(
+            side='left', padx=(2, 12))
         ttk.Label(opts, text="Timezone").pack(side='left')
         ttk.Entry(opts, textvariable=self.var_tz, width=20).pack(side='left', padx=(4, 12))
         ttk.Label(opts, text="Water °C").pack(side='left')
@@ -1727,6 +1749,62 @@ class LocationGUI(tk.Tk):
         ttk.Label(bar, textvariable=self.var_status).pack(side='left', padx=(12, 0))
         ttk.Button(bar, text="Save locations.json", command=self._save).pack(side='right')
         ttk.Button(bar, text="Reload", command=self._load_catalog).pack(side='right', padx=(0, 6))
+        ttk.Button(bar, text="Check for updates",
+                   command=self._check_updates).pack(side='right', padx=(0, 6))
+
+    # ── updates ──────────────────────────────────────────────────────────────
+    def _check_updates(self):
+        """Ask GitHub and PyPI what is newer, then offer to update AnchorHold."""
+        def work(log, _cancel):
+            app = updates.check_app(log)
+            try:
+                python = find_pingmapper_python()
+            except RuntimeError:
+                python = ''
+            ping = updates.check_pingmapper(python, log)
+            log('')
+            for line in updates.summary(app, ping).splitlines():
+                log(line)
+            return app, ping
+
+        TaskDialog(self, "Checking for updates", work, self._after_update_check)
+
+    def _after_update_check(self, found):
+        app, ping = found
+        if not (app['ok'] and app['behind']):
+            messagebox.showinfo("Check for updates", updates.summary(app, ping))
+            return
+        if app['ahead']:
+            messagebox.showwarning(
+                "Check for updates",
+                updates.summary(app, ping) + "\n\nThis copy has commits of its own "
+                "that are not on GitHub, so it cannot simply move forward. Merge "
+                "the update with git yourself.")
+            return
+        if app['blocked']:
+            messagebox.showwarning(
+                "Check for updates",
+                updates.summary(app, ping) + "\n\nThese files are edited on this PC "
+                "and changed in the update too, so git would stop:\n    "
+                + "\n    ".join(app['blocked'])
+                + "\n\nCommit or set those edits aside, then check again.")
+            return
+        if not messagebox.askyesno(
+                "Check for updates",
+                updates.summary(app, ping) + "\n\nUpdate AnchorHold now?"):
+            return
+        if self.dirty and messagebox.askyesno(
+                "Check for updates", "Save locations.json before updating?"):
+            self._save()
+        TaskDialog(self, "Updating AnchorHold",
+                   lambda log, _cancel: updates.update_app(log),
+                   self._after_update)
+
+    def _after_update(self, _output):
+        messagebox.showinfo(
+            "Check for updates",
+            "AnchorHold is updated. Close and reopen Add Survey Locations to use "
+            "the new version, and restart run_web_app.bat if it is running.")
 
     # ── catalog ──────────────────────────────────────────────────────────────
     def _load_catalog(self):
@@ -1765,8 +1843,10 @@ class LocationGUI(tk.Tk):
             'substrate': inputs.get('substrate', ''),
             'sonar': list(inputs.get('sonar') or []),
         }
+        # Down sonar defaults on: it takes seconds, and surveys saved before
+        # the option existed were already getting it.
         entry['generate'] = dict({'sonar': False, 'substrate': False,
-                                  'rock': False, 'ghost': False},
+                                  'rock': False, 'ghost': False, 'down': True},
                                  **(e.get('generate') or {}))
         entry['processing'] = processing_of(e)
         entry['tiles'] = dict(e.get('tiles') or {})
@@ -1984,6 +2064,7 @@ class LocationGUI(tk.Tk):
         self.var_make_substrate.set(bool(gen.get('substrate')))
         self.var_make_rock.set(bool(gen.get('rock')))
         self.var_make_ghost.set(bool(gen.get('ghost')))
+        self.var_make_down.set(bool(gen.get('down', True)))
         self.processing = processing_of(e)
         for group, choice in self.processing.items():
             self.var_choice[group].set(describe_choice(group, choice))
@@ -2040,7 +2121,8 @@ class LocationGUI(tk.Tk):
         e['generate'] = {'sonar': bool(self.var_make_sonar.get()),
                          'substrate': bool(self.var_make_substrate.get()),
                          'rock': bool(self.var_make_rock.get()),
-                         'ghost': bool(self.var_make_ghost.get())}
+                         'ghost': bool(self.var_make_ghost.get()),
+                         'down': bool(self.var_make_down.get())}
         e['processing'] = {group: {'preset': choice['preset'],
                                    'values': dict(choice['values'])}
                            for group, choice in self.processing.items()}
@@ -2313,8 +2395,15 @@ class LocationGUI(tk.Tk):
         timezone = entry['timezone']
         temp = entry.get('waterTempC', DEFAULT_WATER_TEMP)
         auto_depth = entry.get('autoDepthPick', False)
-        zoom_min = self.var_zoom_min.get().strip() or '12'
-        zoom_max = self.var_zoom_max.get().strip() or '17'
+        zoom_min = self.var_zoom_min.get().strip().lower() or 'lowest'
+        zoom_max = self.var_zoom_max.get().strip().lower() or 'highest'
+        if (not (zoom_min == 'lowest' or zoom_min.isdigit())
+                or not (zoom_max == 'highest' or zoom_max.isdigit())):
+            messagebox.showerror(
+                "Locations",
+                "Tile zooms are whole numbers, or 'lowest' and 'highest' to "
+                "work them out from the recording.")
+            return
         sonar = entry['inputs']['sonar']
         substrate = entry['inputs']['substrate'] or ''
         gen = entry.get('generate') or {}
@@ -2322,6 +2411,7 @@ class LocationGUI(tk.Tk):
         make_substrate = bool(gen.get('substrate'))
         make_rock = bool(gen.get('rock'))
         make_ghost = bool(gen.get('ghost'))
+        make_down = bool(gen.get('down', True))
         processing = processing_of(entry)
         wanted_settings = decode_settings(processing, make_sonar, make_substrate)
         tide = 'guaymas' if (entry.get('tide') or {}).get('mode') == 'guaymas' else 'none'
@@ -2366,6 +2456,26 @@ class LocationGUI(tk.Tk):
                     depth_csv = products['csv']
                     local_sonar = products['sonar']
                     local_substrate = products['substrate']
+
+            # The down beam, straight from the recording. A failure costs this
+            # layer only, never the chart.
+            if make_down and recording:
+                project = os.path.splitext(os.path.basename(recording))[0]
+                log("Down sonar waterfall ...")
+                try:
+                    down_sonar.build(os.path.join(os.path.dirname(depth_csv), project),
+                                     recording, out_dir, log=log)
+                except Exception as exc:
+                    log(f"WARNING: no down sonar layer - {exc}")
+                log("")
+            else:
+                # Unticked: a waterfall left from an earlier build would
+                # otherwise ride along into the chart as if it had been asked for.
+                for name in (down_sonar.IMAGE_NAME, down_sonar.INDEX_NAME):
+                    stale = os.path.join(out_dir, name)
+                    if os.path.isfile(stale):
+                        os.remove(stale)
+                        log(f"Removed {name} - down sonar is unticked.")
 
             cmd = [sys.executable, '-u', PROCESS_SCRIPT,
                    '--csv', depth_csv,
@@ -2414,7 +2524,8 @@ class LocationGUI(tk.Tk):
             log("Building charts: " + " ".join(cmd) + "\n")
             proc = subprocess.Popen(
                 cmd, cwd=repo_dir, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, errors='replace')
+                text=True, bufsize=1, encoding='utf-8', errors='replace',
+                env=dict(os.environ, PYTHONIOENCODING='utf-8'))
             try:
                 for line in proc.stdout:
                     log(line.rstrip())

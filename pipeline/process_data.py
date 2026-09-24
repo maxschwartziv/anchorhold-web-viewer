@@ -48,6 +48,17 @@ ZOOM_MIN  = 12
 ZOOM_MAX  = 17
 TILE_SIZE = 256
 
+# --zoom-min lowest: tile out to the zoom where the survey is still this many
+# pixels across. Further out it is a speck, and a speck tile is wasted work.
+LOWEST_ZOOM_MIN_PX = 8
+
+# --zoom-max highest: tile each layer until a tile pixel is about as fine as
+# its own source pixel. Stopping when a tile pixel is within this factor of it
+# saves a whole zoom level (4x the tiles) for detail that is not there - a
+# 0.44 m depth grid is z18.1, and z19 would draw each cell as 1.5 tile pixels.
+HIGHEST_ZOOM_SLACK = 0.3            # in zoom levels: 2**0.3 = 1.23x
+HIGHEST_ZOOM_CAP = 22
+
 # Timezone the sonar logs its timestamps in (used to reduce soundings to LAT).
 SURVEY_TIMEZONE = "America/Hermosillo"
 
@@ -1626,8 +1637,13 @@ def parse_args(argv=None):
                    help="RockMapper habitat raster GeoTIFF (see rock_map.py); "
                         "adds the rock overlay layer")
     p.add_argument("--out-dir", default=OUT_DIR, help="where to write the outputs")
-    p.add_argument("--zoom-min", type=int, default=ZOOM_MIN)
-    p.add_argument("--zoom-max", type=int, default=ZOOM_MAX)
+    p.add_argument("--zoom-min", type=zoom_min_arg, default=ZOOM_MIN,
+                   help="first tile zoom, or 'lowest' for the furthest-out zoom "
+                        "at which the survey is still visible "
+                        f"({LOWEST_ZOOM_MIN_PX} px across)")
+    p.add_argument("--zoom-max", type=zoom_max_arg, default=ZOOM_MAX,
+                   help="last tile zoom, or 'highest' to tile each layer as "
+                        "deep as its own resolution reaches")
     p.add_argument("--timezone", default=SURVEY_TIMEZONE,
                    help="timezone the CSV timestamps are in (IANA name)")
     p.add_argument("--contour-interval-ft", type=int, default=CONTOUR_INTERVAL_FT,
@@ -1643,6 +1659,81 @@ def parse_args(argv=None):
     p.add_argument("--no-tide", action="store_true",
                    help="alias for --tide none")
     return p.parse_args(argv)
+
+
+def zoom_min_arg(value: str):
+    """A zoom number, or 'lowest' to have it worked out from the survey."""
+    if value.strip().lower() == "lowest":
+        return "lowest"
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a zoom level or 'lowest': {value!r}")
+
+
+def zoom_max_arg(value: str):
+    """A zoom number, or 'highest' to take each layer to its own resolution."""
+    if value.strip().lower() == "highest":
+        return "highest"
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a zoom level or 'highest': {value!r}")
+
+
+def native_zoom(tif_path: str) -> int:
+    """
+    The zoom at which a tile pixel is about as fine as the raster's own.
+
+    Deeper than this, tiling only enlarges what is already there; the app
+    overzooms the last level by itself, for free. Measured the same way the
+    sonar tiler caps its depth, and bounded to [ZOOM_MIN, HIGHEST_ZOOM_CAP].
+    """
+    from rasterio.warp import transform_bounds
+    with rasterio.open(tif_path) as src:
+        west, south, east, north = transform_bounds(src.crs, CRS.from_epsg(4326),
+                                                    *src.bounds)
+        width = max(src.width, 1)
+    mid_lat = math.radians((south + north) / 2)
+    res_m = (east - west) * 111320.0 * math.cos(mid_lat) / width
+    if res_m <= 0:
+        return HIGHEST_ZOOM_CAP
+    exact = math.log2(156543.03392 * math.cos(mid_lat) / res_m)
+    zoom = math.ceil(exact - HIGHEST_ZOOM_SLACK)
+    return int(max(ZOOM_MIN, min(HIGHEST_ZOOM_CAP, zoom)))
+
+
+def lowest_zoom(rasters: list, zoom_max: int) -> int:
+    """
+    The furthest-out zoom at which the survey still shows.
+
+    Every layer's extent is pooled, since the sonar swath reaches past the
+    soundings, and the survey's larger side in web mercator is found as a
+    fraction of the world. A world tile is 256 px, so at zoom z that side is
+    fraction * 256 * 2**z pixels; the answer is the first z at which that
+    reaches LOWEST_ZOOM_MIN_PX. Never above zoom_max: a survey too small to
+    show even there still gets its tiles.
+    """
+    from rasterio.warp import transform_bounds
+    west = south = math.inf
+    east = north = -math.inf
+    for path in rasters:
+        if not path or not os.path.isfile(path):
+            continue
+        with rasterio.open(path) as src:
+            w, s, e, n = transform_bounds(src.crs, CRS.from_epsg(4326), *src.bounds)
+        west, south = min(west, w), min(south, s)
+        east, north = max(east, e), max(north, n)
+    if not math.isfinite(west):
+        return min(12, zoom_max)
+
+    def merc_y(lat):
+        lat = max(-85.0511, min(85.0511, lat))
+        return math.log(math.tan(math.pi / 4 + math.radians(lat) / 2)) / (2 * math.pi)
+
+    fraction = max((east - west) / 360.0, merc_y(north) - merc_y(south), 1e-12)
+    zoom = math.ceil(math.log2(LOWEST_ZOOM_MIN_PX / (fraction * TILE_SIZE)))
+    return int(max(0, min(zoom_max, zoom)))
 
 
 def main(argv=None):
@@ -1691,13 +1782,30 @@ def main(argv=None):
         merge_sonar(sonar_tiles, sonar_tif, meta_csv=args.sonar_meta,
                     blend=not args.sonar_best_only)
 
+    highest = ZOOM_MAX == "highest"
+    if ZOOM_MIN == "lowest":
+        ZOOM_MIN = lowest_zoom([bathy_tif, sonar_tif if sonar_tiles else "",
+                                substrate_tif, rock_tif],
+                               HIGHEST_ZOOM_CAP if highest else ZOOM_MAX)
+        print(f"\nLowest tile zoom: z{ZOOM_MIN} - the survey is at least "
+              f"{LOWEST_ZOOM_MIN_PX} px across from there in")
+
+    def set_zoom_max(tif, name):
+        """With 'highest', each layer goes as deep as its own pixels reach."""
+        global ZOOM_MAX
+        if highest:
+            ZOOM_MAX = native_zoom(tif)
+            print(f"  {name}: tiling to z{ZOOM_MAX}, its own resolution")
+
     print("\n[3/3] Generating MBTiles...")
+    set_zoom_max(bathy_tif, "depth")
     raster_to_mbtiles(bathy_tif,  bathy_mbtiles, "bathymetry")
     if sonar_tiles:
         build_sonar_mbtiles(sonar_tif, sonar_mbtiles)
     else:
         print("  (no sonar mosaic given - skipping sonar layer)")
     if substrate_tif:
+        set_zoom_max(substrate_tif, "substrate")
         build_substrate_mbtiles(substrate_tif, substrate_mbtiles)
         build_substrate_legend(os.path.join(OUT_DIR, "substrate_legend.png"))
         build_substrate_grid(substrate_tif,
@@ -1707,6 +1815,7 @@ def main(argv=None):
         print("  (no substrate raster given - skipping substrate layer)")
 
     if rock_tif:
+        set_zoom_max(rock_tif, "rock")
         build_rock_mbtiles(rock_tif, rock_mbtiles)
         build_rock_legend(os.path.join(OUT_DIR, "rock_legend.png"), rock_tif)
     else:
