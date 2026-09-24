@@ -15,7 +15,7 @@
 // that no longer throws. Bump this and CHART_CACHE in js/offline.js
 // together - they name the same cache, and the activate step below
 // deletes any anchoring- cache whose name it does not recognise.
-const VERSION = 'v21';
+const VERSION = 'v23';
 const SHELL = `anchoring-shell-${VERSION}`;
 const CHARTS = `anchoring-charts-${VERSION}`;   // == CHART_CACHE in js/offline.js
 
@@ -33,6 +33,7 @@ const SHELL_FILES = [
   'js/legend.js',
   'js/offline.js',
   'js/map.js',
+  'js/downscan.js',
   'js/app.js',
   'js/selftest.js',
   'vendor/maplibre-gl.js',

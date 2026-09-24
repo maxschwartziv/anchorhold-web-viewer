@@ -30,6 +30,14 @@ covering every stage from planning survey transects to each chart overlay.
 - **Objects.** [GhostVision](https://github.com/PINGEcosystem/GhostVision)
   detections as hollow rings, so the evidence underneath stays visible. Work
   in progress.
+- **Down.** The down-looking beam, read straight from the recording: a line
+  along the track on the chart, and a waterfall of what was under the boat.
+  Tap the line to open it there, drag the waterfall to move along the track.
+  The strip of bottom the beam covered is shaded either side of the line, as
+  wide as the beam's cone at the depth there. The &harr; button measures
+  horizontal distance: drag across the waterfall for the along-track and
+  straight-line distance and time between two pings, drawn on the map too.
+  Uses Down Imaging when the recording has it, otherwise the 200 kHz beam.
 - Shallow-water shading below a chosen depth, survey outlines, tracklines and
   a pin per surveyed area, none of which need a toggle.
 

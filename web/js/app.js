@@ -70,6 +70,9 @@
     // Pots are points, not a raster sheet, so they have a switch and no
     // opacity: a half-faded mark on the bottom is worth nothing to anyone.
     ChartMap.setVisible('detections-layer', Prefs.potsOn && detectionCount > 0);
+    const downOn = Prefs.downOn && DownScan.available;
+    ChartMap.setVisible('downscan-track', downOn);
+    ChartMap.setVisible('downscan-swath', downOn);
     recomputeTide();
     refreshLayerButtons();
     updateLegends();
@@ -94,6 +97,13 @@
     potsButton.textContent = potsOn ? 'OBJECTS ON' : 'OBJECTS OFF';
     $('potsCount').textContent = detectionCount === 1
       ? '1 found' : `${detectionCount} found`;
+    const down = document.querySelector('.row.layer[data-layer="downscan"]');
+    down.classList.toggle('hidden', !DownScan.available);
+    const downOn = Prefs.downOn && DownScan.available;
+    $('toggleDown').classList.toggle('on', downOn);
+    $('toggleDown').textContent = downOn ? 'DOWN ON' : 'DOWN OFF';
+    $('downLabel').textContent = DownScan.label;
+    $('btnDownView').classList.toggle('on', DownScan.isOpen);
     measurePanel();
   }
 
@@ -243,6 +253,8 @@
       ChartMap.setDetections(fc);
       applyControlsToChart();
     });
+    // Same again for the down sonar: its row appears once the index is in.
+    DownScan.load(target).then(applyControlsToChart);
   }
 
   async function loadOverlay(target, key, apply) {
@@ -1214,6 +1226,7 @@
 
   function applyDayNight(night) {
     document.body.classList.toggle('night', night);
+    DownScan.render();
     $('toggleDayNight').setAttribute('aria-pressed', String(night));
     $('toggleDayNight').innerHTML = night ? '&#9788; DAY' : '&#9789; NIGHT';
   }
@@ -1245,6 +1258,23 @@
       Prefs.potsOn = !Prefs.potsOn;
       applyControlsToChart();
     });
+    $('toggleDown').addEventListener('click', () => {
+      Prefs.downOn = !Prefs.downOn;
+      if (!Prefs.downOn) DownScan.close();
+      applyControlsToChart();
+    });
+    // VIEW opens the waterfall where it last was; switching the line on as
+    // well, since a cursor moving along a track you cannot see is no help.
+    $('btnDownView').addEventListener('click', () => {
+      if (DownScan.isOpen) {
+        DownScan.close();
+      } else {
+        Prefs.downOn = true;
+        DownScan.show();
+      }
+      applyControlsToChart();
+    });
+    $('btnDownClose').addEventListener('click', refreshLayerButtons);
   }
 
   function wireTide() {
@@ -1497,6 +1527,7 @@
       Prefs.depthUnit = e.target.value;
       recomputeTide();
       updateLegends();
+      DownScan.render();
       if (AnchorWatch.lastFix) onFix(AnchorWatch.lastFix, !AnchorWatch.isBreached);
     });
     $('setScope').addEventListener('input', e => {
@@ -1551,6 +1582,16 @@
       // happily answer for the water on top of it, so ask about it first.
       const pot = ChartMap.detectionAt(e.point);
       if (pot) { describeDetection(pot); return; }
+      // A tap on the down sonar line opens the waterfall at that ping.
+      if (Prefs.downOn && DownScan.available) {
+        const reach = ChartMap.metresPerPixel() * (window.devicePixelRatio || 1) * 16;
+        const ping = DownScan.nearest(e.lngLat.lng, e.lngLat.lat, reach);
+        if (ping >= 0) {
+          DownScan.show(ping);
+          refreshLayerButtons();
+          return;
+        }
+      }
       // Tap-to-query: charted depth (tide-corrected) plus substrate.
       const charted = DepthGrid.depthAt(e.lngLat.lat, e.lngLat.lng);
       if (charted === null) return;      // ignore taps outside the survey
@@ -1576,6 +1617,7 @@
   // ── Start-up ───────────────────────────────────────────────────────────────
 
   async function main() {
+    DownScan.wire();
     wireLayerRows();
     wireImagePanel();
     wireTide();

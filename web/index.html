@@ -102,6 +102,15 @@
     <span class="label" id="potsCount">none</span>
   </div>
 
+  <!-- The down-looking beam: a line along the track on the map, and a
+       waterfall of what was under the boat at any point on it. Hides itself
+       on a chart built without one. -->
+  <div class="row layer hidden" data-layer="downscan">
+    <button class="toggle" id="toggleDown" type="button">DOWN OFF</button>
+    <span class="label" id="downLabel">200 kHz down</span>
+    <button class="adjust" id="btnDownView" type="button" title="Show the down sonar waterfall">VIEW</button>
+  </div>
+
   <div class="row">
     <span class="label" id="labelMinDepth">Min depth: off</span>
     <input id="seekMinDepth" type="range" min="0" max="20" value="6" aria-label="Shallow-water warning">
@@ -278,6 +287,21 @@
   </form>
 </dialog>
 
+<!-- Down sonar waterfall. Not a dialog: the map stays live under it, so the
+     cursor can be watched moving along the track while the image is dragged. -->
+<section id="downPanel" hidden>
+  <header>
+    <span id="downTitle">Down sonar</span>
+    <span id="downReadout" class="down-readout"></span>
+    <button id="btnDownMeasure" type="button" title="Measure horizontal distance along the track">&harr;</button>
+    <button id="btnDownZoomOut" type="button" title="More pings on screen">&minus;</button>
+    <button id="btnDownZoomIn" type="button" title="Fewer pings, wider">+</button>
+    <button id="btnDownClose" type="button" title="Close">&times;</button>
+  </header>
+  <canvas id="downCanvas"></canvas>
+  <p class="down-hint" id="downHint">Drag to move along the track. Tap the line on the map to jump.</p>
+</section>
+
 <div id="toast" hidden></div>
 
 <script src="vendor/maplibre-gl.js"></script>
@@ -293,6 +317,7 @@
 <script src="js/source.js"></script>
 <script src="js/offline.js"></script>
 <script src="js/map.js"></script>
+<script src="js/downscan.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

@@ -47,7 +47,10 @@ TILES = {"bathymetry": "bathymetry.mbtiles", "sonar": "sonar.mbtiles",
          "substrate": "substrate.mbtiles", "rock": "rock.mbtiles"}
 DATA = {"contours": "contours.geojson", "shallowBands": "shallow_bands.geojson",
         "boundary": "boundary.geojson", "track": "track.geojson",
-        "detections": "detections.geojson"}
+        "detections": "detections.geojson",
+        # The down-looking beam as a waterfall along the track: the index is
+        # what the app reads first, the image only once the panel opens.
+        "downscan": "downscan.json", "downscanImage": "downscan.png"}
 GRIDS = {"depthGrid": "depth_grid", "substrateGrid": "substrate_grid"}
 LEGENDS = {"depth": "depth_legend.png", "substrate": "substrate_legend.png",
            "rock": "rock_legend.png"}

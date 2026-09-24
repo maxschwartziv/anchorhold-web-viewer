@@ -10,6 +10,9 @@ const Prefs = (() => {
     // Crab pots default on: a chart only has them because someone went
     // looking, and the whole reason to open that chart is to see them.
     potsOn: true,
+    // The down sonar's trackline. Off like the mosaic: it is a thing you go
+    // looking at, and a second line over the survey track is noise otherwise.
+    downOn: false,
 
     bathyOpacity: 100, sonarOpacity: 100, substrateOpacity: 80, rockOpacity: 80,
     // How each sonar mosaic is drawn, not what it contains. Keyed by survey id,

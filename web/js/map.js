@@ -93,7 +93,9 @@ const ChartMap = (() => {
     }
     ['locations-source', 'contours-source', 'shallow-source', 'geofence-source',
       'geofence-verts', 'gps-dot-source', 'gps-track-source', 'waypoints-source',
-      'preview-area-source', 'preview-track-source', 'detections-source']
+      'preview-area-source', 'preview-track-source', 'detections-source',
+      'downscan-track-source', 'downscan-cursor-source',
+      'downscan-swath-source', 'downscan-measure-source']
       .forEach(geojsonSource);
 
     const add = (layer) => {
@@ -139,6 +141,37 @@ const ChartMap = (() => {
         'circle-color': 'rgba(0, 0, 0, 0)',
         'circle-stroke-color': '#ff4fd8',
         'circle-stroke-width': 2,
+      },
+    });
+    // The down sonar's track, and where along it the waterfall is looking.
+    // Violet so it cannot be taken for the survey track (yellow) or a
+    // recorded GPS track (blue); the cursor is a ring so the bottom under
+    // it stays visible.
+    // The strip of bottom the down beam covered: as wide as the cone is at
+    // the depth under each ping. Under the track line so both read.
+    map.addLayer({
+      id: 'downscan-swath', type: 'fill', source: 'downscan-swath-source',
+      paint: { 'fill-color': '#B388FF', 'fill-opacity': 0.28, 'fill-outline-color': '#D1B3FF' },
+    });
+    map.addLayer({
+      id: 'downscan-track', type: 'line', source: 'downscan-track-source',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#B388FF', 'line-width': 2.5, 'line-opacity': 0.9 },
+    });
+    // A distance measured on the waterfall, drawn over the stretch of track
+    // it covers, in the same amber as the measure marks on the image.
+    map.addLayer({
+      id: 'downscan-measure', type: 'line', source: 'downscan-measure-source',
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#FFD54F', 'line-width': 5, 'line-opacity': 0.95 },
+    });
+    map.addLayer({
+      id: 'downscan-cursor', type: 'circle', source: 'downscan-cursor-source',
+      paint: {
+        'circle-radius': 9,
+        'circle-color': 'rgba(0, 0, 0, 0)',
+        'circle-stroke-color': '#FFFFFF',
+        'circle-stroke-width': 3,
       },
     });
     map.addLayer({
@@ -241,6 +274,7 @@ const ChartMap = (() => {
     const layerIds = [
       'bathymetry-layer', 'sonar-layer', 'substrate-layer', 'rock-layer',
       'shallow-layer', 'contours-layer', 'contour-labels', 'detections-layer',
+      'downscan-swath', 'downscan-track', 'downscan-measure', 'downscan-cursor',
       'geofence-fill', 'geofence-line', 'geofence-verts',
       'gps-track-layer', 'gps-dot-layer', 'waypoints-layer', 'waypoint-labels',
       'preview-area-fill', 'preview-area-line', 'preview-track-line',
@@ -249,6 +283,8 @@ const ChartMap = (() => {
     layerIds.forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
     [...RASTERS.map(n => `${n}-source`), 'locations-source', 'contours-source',
       'shallow-source', 'detections-source', 'geofence-source',
+      'downscan-track-source', 'downscan-cursor-source',
+      'downscan-swath-source', 'downscan-measure-source',
       'geofence-verts', 'gps-dot-source',
       'gps-track-source', 'waypoints-source',
       'preview-area-source', 'preview-track-source']
@@ -393,6 +429,24 @@ const ChartMap = (() => {
     setContourData(fc) { setData('contours-source', fc); },
     setShallowData(fc) { setData('shallow-source', fc); },
     setDetections(fc) { setData('detections-source', fc); },
+    setDownTrack(fc) { setData('downscan-track-source', fc); },
+    setDownSwath(fc) { setData('downscan-swath-source', fc); },
+
+    /** The measured stretch of down sonar track; fewer than two points clears it. */
+    setDownMeasure(points) {
+      setData('downscan-measure-source', !points || points.length < 2 ? EMPTY : {
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: points } }],
+      });
+    },
+
+    /** Put the down sonar cursor at a position; null takes it off the chart. */
+    setDownCursor(lon, lat) {
+      setData('downscan-cursor-source', lon === null ? EMPTY : {
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', properties: {}, geometry: { type: 'Point', coordinates: [lon, lat] } }],
+      });
+    },
     setPins(fc) { setData('locations-source', fc); },
     setWaypoints(fc) { setData('waypoints-source', fc); },
 

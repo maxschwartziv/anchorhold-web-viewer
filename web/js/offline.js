@@ -14,7 +14,7 @@ const Offline = (() => {
   // Must be the same name the service worker reads from: it had drifted to
   // v1 against the worker's v7, so every survey saved for offline use went
   // into a cache nothing served and the worker then deleted.
-  const CHART_CACHE = 'anchoring-charts-v21';
+  const CHART_CACHE = 'anchoring-charts-v23';
 
   const CHART_CACHE_PREFIX = 'anchoring-charts-';
   const PARALLEL = 8;          // enough to saturate a local server, not swamp it
