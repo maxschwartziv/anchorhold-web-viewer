@@ -29,8 +29,8 @@ import matplotlib.patheffects as pe
 from matplotlib.collections import PolyCollection
 from matplotlib.figure import Figure
 
-from planner import (basemap, exporters, imagery, plan as planning,
-                     shoreline)
+from planner import (basemap, boat, depthgrid, exporters, imagery,
+                     plan as planning, shoreline)
 from planner.geometry import LocalFrame, polyline_length_ft
 
 MILES_TO_FEET = 5280.0
@@ -103,6 +103,7 @@ class SurveyPlannerApp(tk.Tk):
         self._picking_access = tk.BooleanVar(value=False)
         self._drawing_roi = tk.BooleanVar(value=False)
         self.no_go = []             # [{name, kind, geom}] in local feet
+        self.depth_grids = []       # AnchorHold depth grids loaded for this lake
         self.no_go_pts = []         # corners of the one being drawn
         self._drawing_no_go = tk.BooleanVar(value=False)
         self._view = None           # held xlim/ylim once the map has been moved
@@ -287,6 +288,26 @@ class SurveyPlannerApp(tk.Tk):
                   " on the water. Check them.",
                   foreground="#777", wraplength=260,
                   justify="left").pack(anchor="w")
+        ttk.Button(no_go, text="From depth grids...",
+                   command=self.on_depth_no_go).pack(fill="x", pady=(6, 2))
+        shallow = ttk.Frame(no_go); shallow.pack(fill="x")
+        ttk.Label(shallow, text="Min depth (ft)",
+                  width=26).pack(side="left")
+        self.shallow_ft_var = tk.StringVar(value="3")
+        ttk.Entry(shallow, textvariable=self.shallow_ft_var,
+                  width=8).pack(side="left")
+        trust = ttk.Frame(no_go); trust.pack(fill="x")
+        ttk.Label(trust, text="Trust soundings within (ft)",
+                  width=26).pack(side="left")
+        self.trust_ft_var = tk.StringVar(value="25")
+        ttk.Entry(trust, textvariable=self.trust_ft_var,
+                  width=8).pack(side="left")
+        ttk.Label(no_go, text="Load... and From depth grids... take AnchorHold"
+                  " depth grids (depth_grid.json) and Humminbird recordings"
+                  " (.DAT). Water sounded shallower than Min depth becomes"
+                  " no-go; water never sounded does not.",
+                  foreground="#777", wraplength=260,
+                  justify="left").pack(anchor="w")
 
         params = self._section(left, "5. Parameters")
         for key, label, default in (
@@ -364,6 +385,8 @@ class SurveyPlannerApp(tk.Tk):
                    command=lambda: self.on_export("plan")).pack(fill="x", pady=2)
         ttk.Button(export, text="GeoJSON (whole plan)...",
                    command=lambda: self.on_export("geojson")).pack(fill="x")
+        ttk.Button(export, text="Boat package (fence + chart)...",
+                   command=self.on_export_boat).pack(fill="x", pady=(2, 0))
 
         self.status = ttk.Label(left, text="Ready", foreground="#444",
                                 wraplength=250, justify="left")
@@ -773,6 +796,7 @@ class SurveyPlannerApp(tk.Tk):
         self._view = None
         self._outline_key, self._outline_cache = 'x', None
         self.no_go, self.no_go_pts = [], []
+        self.depth_grids = []
         self.no_go_list.delete(0, "end")
         remembered = (" " + str(len(self.access)) + " remembered access point(s)."
                       if self.access else "")
@@ -1150,25 +1174,51 @@ class SurveyPlannerApp(tk.Tk):
                       " for this water: " + remembered)
 
     def on_load_no_go(self):
-        """Read no-go areas back from a file."""
-        if self.frame is None:
+        """
+        No-go areas from files: saved no-go areas, AnchorHold depth grids
+        (depth_grid.json) and Humminbird recordings (.DAT), several at once.
+
+        Saved areas load as they were saved. Grids and recordings become
+        no-go wherever they sounded shallower than Min depth.
+        """
+        if self.frame is None or self.poly is None:
             return messagebox.showinfo("Survey Planner",
                                        "Load a shoreline first.")
-        path = filedialog.askopenfilename(
-            title="Open no-go areas",
-            filetypes=[("No-go areas", "*.json"), ("All files", "*.*")])
-        if not path:
+        paths = filedialog.askopenfilenames(
+            title="Open no-go areas, depth grids or recordings",
+            filetypes=[("No-go, depth grid or recording", "*.json *.DAT *.dat"),
+                       ("Saved no-go areas", "*.json"),
+                       ("AnchorHold depth grid", "depth_grid.json"),
+                       ("Humminbird recording", "*.DAT *.dat"),
+                       ("All files", "*.*")])
+        if not paths:
             return
-        zones = shoreline.load_no_go(self.body or {}, self.frame, path)
-        if not zones:
-            return messagebox.showinfo(
-                "Survey Planner",
-                "No no-go areas could be read from that file.")
-        for zone in zones:
-            self._add_no_go(zone, redraw=False)
-        self._draw()
-        self._say("Loaded " + str(len(zones)) + " no-go area(s) from "
-                  + os.path.basename(path) + ".")
+        saved, sources = [], []
+        for path in paths:
+            if os.path.basename(path).lower() == "depth_grid.json" \
+                    or path.lower().endswith(".dat"):
+                sources.append(path)
+            else:
+                saved.append(path)
+        loaded = 0
+        for path in saved:
+            zones = shoreline.load_no_go(self.body or {}, self.frame, path)
+            if not zones:
+                messagebox.showinfo("Survey Planner", os.path.basename(path)
+                                    + " holds no no-go areas. Saved no-go files,"
+                                    " depth_grid.json and Humminbird .DAT"
+                                    " recordings can be loaded.")
+                continue
+            for zone in zones:
+                self._add_no_go(zone, redraw=False)
+            loaded += len(zones)
+        if saved:
+            self._draw()
+        if sources:
+            self._add_depth_sources(sources)
+        elif loaded:
+            self._say("Loaded " + str(loaded) + " no-go area(s) from "
+                      + ", ".join(os.path.basename(p) for p in saved) + ".")
 
     def on_remove_no_go(self):
         picked = self.no_go_list.curselection()
@@ -1185,9 +1235,125 @@ class SurveyPlannerApp(tk.Tk):
         count = len(self.no_go)
         self.no_go.clear()
         self.no_go_pts = []
+        self.depth_grids = []
         self.no_go_list.delete(0, "end")
         self._say("Removed " + str(count) + " no-go area(s).")
         self._draw()
+
+    def _depth_settings(self):
+        """(min depth ft, trust ft) from section 4, or None after saying why."""
+        try:
+            return (float(self.shallow_ft_var.get()),
+                    float(self.trust_ft_var.get() or 0))
+        except ValueError:
+            messagebox.showerror("Survey Planner", "Min depth and Trust soundings"
+                                 " within must be numbers of feet.")
+            return None
+
+    def _add_depth_sources(self, sources):
+        """
+        No-go areas from depth grids and Humminbird recordings.
+
+        Every source becomes a depth grid - a recording is gridded from its
+        pings - and the grids are kept for the boat package, which puts them
+        on the SD card for the lookahead. Returns the number of zones added.
+        """
+        settings = self._depth_settings()
+        if settings is None:
+            return 0
+        min_ft, trust_ft = settings
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            zones, grids, notes = depthgrid.shallow_no_go(
+                sources, self.frame, self.poly, min_ft, trust_ft)
+        except Exception as exc:
+            messagebox.showerror("Survey Planner", "Could not read "
+                                 + ", ".join(os.path.basename(str(x)) for x in sources)
+                                 + ": " + str(exc))
+            return 0
+        finally:
+            self.config(cursor="")
+        away = [g.name for g in grids if not self.poly.intersects(self._grid_box(g))]
+        if away:
+            messagebox.showwarning("Survey Planner", ", ".join(away) + " does not"
+                                   " overlap this lake - check it is the right one.")
+        self.depth_grids.extend(grids)
+        for zone in zones:
+            self._add_no_go(zone, redraw=False)
+        self._draw()
+        self._say(" ".join(notes) + ". " + str(len(zones)) + " area(s) shallower than "
+                  + format(min_ft, "g") + " ft added as no-go. Compute to plan"
+                  " around them.")
+        return len(zones)
+
+    def on_depth_no_go(self):
+        """Depth grid or recording folders, picked one at a time."""
+        if self.poly is None or self.frame is None:
+            return messagebox.showinfo("Survey Planner", "Load a shoreline first.")
+        if self._depth_settings() is None:
+            return
+        folders = []
+        while True:
+            folder = filedialog.askdirectory(
+                title="AnchorHold chart folder or Humminbird recording folder")
+            if not folder:
+                break
+            folders.append(folder)
+            if not messagebox.askyesno("Survey Planner",
+                                       "Add another depth grid or recording"
+                                       " for this lake?"):
+                break
+        if folders:
+            self._add_depth_sources(folders)
+
+    def _grid_box(self, grid):
+        """A depth grid's extent in local feet."""
+        from shapely.geometry import box
+        h = grid.header
+        x0, y0 = self.frame.to_ft(h["lonMin"], h["latMin"])
+        x1, y1 = self.frame.to_ft(h["lonMin"] + h["cols"] * h["dLon"],
+                                  h["latMin"] + h["rows"] * h["dLat"])
+        return box(min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+    def on_export_boat(self):
+        """Fence, chart and parameters for the boat (ArduPilot + shoal_guard)."""
+        if self.poly is None or self.frame is None:
+            return messagebox.showinfo("Survey Planner", "Load a shoreline first.")
+        folder = filedialog.askdirectory(title="Where should the boat package go?")
+        if not folder:
+            return
+        tracks = [planning.mission_track(day) for day in self.days]
+        launches = [self.frame.to_ft(*p["lonlat"]) for p in self.access]
+        try:
+            speed = float(self.vars["speed_mph"].get())
+        except (KeyError, ValueError):
+            speed = 2.0
+        try:
+            shallow_ft = float(self.shallow_ft_var.get())
+        except ValueError:
+            shallow_ft = 3.0
+        try:
+            info = boat.write_package(folder, self.frame, self.poly, self.no_go,
+                                      self.depth_grids, launches, speed, shallow_ft,
+                                      tracks=tracks)
+        except Exception as exc:
+            return messagebox.showerror("Survey Planner", f"Boat package failed: {exc}")
+        msg = ("Boat package written to " + folder + ": "
+               + str(len(info["fences"])) + " fence(s), " + info["fenced"]
+               + ", at most " + str(info["bytes"]) + " of " + str(info["budget"])
+               + " bytes, simplified up to " + format(info["tolerance_ft"], ".0f")
+               + " ft, " + str(info["exclusions"]) + " exclusion(s)"
+               + (", chart for the SD card" if self.depth_grids else ", no chart"
+                  " (load depth grids in section 4 to include one)") + ".")
+        if not self.days:
+            msg += (" No plan computed, so the fence is the whole lake - compute"
+                    " first to fence only the water the plan uses.")
+        if info["outside_ft"] > 1:
+            msg += (" WARNING: " + format(info["outside_ft"], ",.0f") + " ft of the"
+                    " plan lies outside the fence and would trip it.")
+            messagebox.showwarning("Survey Planner", msg)
+        self._say(msg)
 
     def on_clear_roi(self):
         self.roi, self.roi_pts = None, []
