@@ -142,6 +142,61 @@ def set_step_mark(step_id: str, done: bool) -> None:
     _save(data)
 
 
+def saved_presets() -> dict:
+    """
+    Presets saved by hand, as {group: {name: {key: value}}}.
+
+    A preset is a named set of values and nothing more, which is what makes
+    these safe to keep here rather than in a survey: a survey records the
+    values it was built with, so deleting a preset never changes what a
+    survey means. It only stops the name being offered.
+    """
+    groups = _load().get("presets")
+    if not isinstance(groups, dict):
+        return {}
+    out = {}
+    for group, presets in groups.items():
+        if isinstance(presets, dict):
+            out[group] = {name: dict(values)
+                          for name, values in presets.items()
+                          if isinstance(values, dict)}
+    return out
+
+
+def save_preset(group: str, name: str, values: dict) -> None:
+    """Remember one set of values under a name, replacing any of that name."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("A preset needs a name.")
+    data = _load()
+    groups = data.get("presets")
+    if not isinstance(groups, dict):
+        groups = {}
+    presets = groups.get(group)
+    if not isinstance(presets, dict):
+        presets = {}
+    presets[name] = dict(values)
+    groups[group] = presets
+    data["presets"] = groups
+    _save(data)
+
+
+def delete_preset(group: str, name: str) -> bool:
+    """Forget one saved preset. True if there was one to forget."""
+    data = _load()
+    groups = data.get("presets")
+    if not isinstance(groups, dict):
+        return False
+    presets = groups.get(group)
+    if not isinstance(presets, dict) or name not in presets:
+        return False
+    del presets[name]
+    groups[group] = presets
+    data["presets"] = groups
+    _save(data)
+    return True
+
+
 def panel_sections() -> dict:
     """Which of the Fixer's side-panel groups are folded open."""
     sections = _load().get("panelSections")

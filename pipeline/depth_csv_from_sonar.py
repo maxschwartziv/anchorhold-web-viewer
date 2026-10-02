@@ -12,6 +12,13 @@ slower products are opt-in:
     --sonar-mosaic     rectified side scan (WCR) mosaicked to GeoTIFF
     --substrate-map    substrate prediction, classified raster and its mosaic
 
+Two ways to avoid paying for a decode that has already happened:
+
+    --reuse-decode     keep the decoded project and redo only the stages the
+                       changed settings actually reach
+    --swatch N         rectify N chunks instead of the whole survey, so a
+                       toning can be looked at in seconds
+
 Output:
     <out_dir>/<project>/meta/*_ds_*_meta.csv     PINGMapper's full metadata
     <out_dir>/<project>_depth.csv                slim lon, lat, dep_m, date, time
@@ -31,8 +38,10 @@ Examples:
 import argparse
 import csv
 import glob
+import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 
@@ -151,7 +160,39 @@ def parse_args(argv=None):
                    help='also export the classified map as polygons '
                         '(shapefiles beside the raster)')
 
+    # -- Reusing work already done ------------------------------------------
+    r = p.add_argument_group('reusing an earlier run')
+    r.add_argument("--reuse-decode", action="store_true",
+                   help="keep the decoded project on disk and redo only what "
+                        "the changed settings reach. Most of the mosaic panel "
+                        "is applied while a chunk is warped and never touches "
+                        "the decode, so this turns a rebuild from minutes into "
+                        "about a minute. Refused when a setting that decides "
+                        "which pings exist has changed")
+    r.add_argument("--swatch", type=int, nargs='?', const=3, default=0,
+                   metavar="N",
+                   help="rectify N chunks (default 3) instead of the whole "
+                        "survey and write them to <project>_swatch/ with a PNG "
+                        "to look at. Survey-wide statistics are kept, so the "
+                        "swatch is toned exactly as the full mosaic would be. "
+                        "Implies --reuse-decode and --sonar-mosaic")
+    r.add_argument("--swatch-at", type=float, default=0.5, metavar="F",
+                   help="where along the survey the swatch is taken, 0 to 1 "
+                        "(default 0.5, the middle)")
+    r.add_argument("--swatch-label", default="", metavar="NAME",
+                   help="put this swatch in <project>_swatch/<NAME>/ instead "
+                        "of the folder itself, and leave its siblings alone. "
+                        "What lets several tonings of the same water be cut "
+                        "one after another and then looked at together")
+
     args = p.parse_args(argv)
+    if args.swatch:
+        # A swatch is a look at a toning, which means it needs the survey-wide
+        # numbers an earlier decode already worked out. There is nothing to
+        # look at without the mosaic stage either.
+        args.reuse_decode = True
+        args.sonar_mosaic = True
+        args.swatch_at = min(1.0, max(0.0, args.swatch_at))
     if args.best_image:
         # EGN and CLAHE, deliberately WITHOUT the dB transform.
         #
@@ -244,6 +285,22 @@ def resolve_threads(args) -> int:
     return min(wanted, fits)
 
 
+def time_filter_digest(path) -> str:
+    """
+    What a time filter says, rather than where it lives.
+
+    A Fixer edit travels as a CSV beside the recording, and editing it again
+    changes which pings are decoded without changing its name. Comparing the
+    contents is the only way the settings check can see that.
+    """
+    if not path or not os.path.isfile(path):
+        return ''
+    digest = hashlib.sha1()
+    with open(path, 'rb') as f:
+        digest.update(f.read())
+    return digest.hexdigest()[:16]
+
+
 def image_settings(args) -> dict:
     """
     The settings that decide what a mosaic looks like, in one dict.
@@ -264,11 +321,102 @@ def image_settings(args) -> dict:
         "claheClip": args.clahe_clip,
         "toneGamma": args.tone_gamma,
         "toneGain": args.tone_gain,
+        "timeFilter": time_filter_digest(args.time_filter),
         "speedCorrect": bool(args.speed_correct),
         "minSpeed": args.min_speed,
         "maxHeadingDeviation": args.max_heading_deviation,
         "maxHeadingDistance": args.max_heading_distance,
     }
+
+
+# ── What a changed setting actually costs ────────────────────────────────────
+#
+# PINGMapper reads the recording, then rectifies, then maps substrate. The
+# settings above are not all at the same depth in that: most of them are
+# applied while a chunk is being warped and never touch the decode at all.
+# Knowing which is which is the difference between a fifteen minute rebuild
+# and a forty second one.
+#
+# Measured on Indian Hills Lake, 32,640 pings: reading 128 s of which the EGN
+# statistics are 39 s, rectify and mosaic 50 s, substrate 377 s.
+
+# Applied while the chunk is warped. rectify_master_func sets the CLAHE and dB
+# ones straight onto the rectObj from the run parameters, so they need nothing
+# but a rectify; tone_gamma and tone_gain it does not set, so those are written
+# into the pickled sonObj first (see prime_project_for_reuse). pix_res_son is
+# handled by read_master_func's own project_mode 2 branch.
+RECTIFY_STAGE_SETTINGS = frozenset({
+    'dbTransform', 'clahe', 'claheClip', 'toneGamma', 'toneGain', 'pixResSon',
+})
+
+# The EGN statistics are a pass over the whole survey, kept on the sonObj. A
+# change here has to redo that pass before the rectify stage can use it.
+EGN_STAGE_SETTINGS = frozenset({'egn', 'egnStretch', 'egnStretchFactor'})
+
+# Everything else decides which pings exist at all, which is the decode.
+# Nothing downstream of it can be reused.
+READ_STAGE_SETTINGS = frozenset({
+    'timeFilter',
+    'speedCorrect', 'minSpeed', 'maxHeadingDeviation', 'maxHeadingDistance',
+})
+
+
+def plan_rerun(cached, wanted):
+    """
+    How much of a run a change to the image settings needs.
+
+    Returns {'stage': 'none'|'rectify'|'egn'|'read', 'changed': [keys]}.
+
+    A key in neither table counts as 'read'. Adding a setting and forgetting
+    to classify it then costs time rather than correctness, which is the right
+    way round: the failure this path must not have is a setting that appears
+    to do nothing.
+    """
+    if not isinstance(cached, dict):
+        return {'stage': 'read', 'changed': ['(no record of the earlier run)']}
+    # Belt and braces: callers should have read the manifest through
+    # cached_image_settings, but a raw dict must not be read as "everything
+    # changed" just because it predates a key.
+    cached = fill_image_defaults(cached)
+    changed = sorted(k for k in set(cached) | set(wanted)
+                     if cached.get(k) != wanted.get(k))
+    if not changed:
+        return {'stage': 'none', 'changed': []}
+    known = RECTIFY_STAGE_SETTINGS | EGN_STAGE_SETTINGS
+    stage = 'rectify'
+    for key in changed:
+        if key not in known:
+            return {'stage': 'read', 'changed': changed}
+        if key in EGN_STAGE_SETTINGS:
+            stage = 'egn'
+    return {'stage': stage, 'changed': changed}
+
+
+# Settings that were added after manifests started being written, with what
+# a manifest's silence about them should be read as. Without this every
+# survey on disk differs from every set of settings by the new key alone,
+# and rebuilds once for no reason.
+IMAGE_SETTING_DEFAULTS = {'timeFilter': ''}
+
+
+def fill_image_defaults(image):
+    """A manifest's image settings, with anything it predates filled in."""
+    if not isinstance(image, dict):
+        return image
+    filled = dict(image)
+    for key, value in IMAGE_SETTING_DEFAULTS.items():
+        filled.setdefault(key, value)
+    return filled
+
+
+def cached_image_settings(out_dir, project):
+    """The image settings the project on disk was last built with, or None."""
+    manifest = os.path.join(out_dir, "%s_products.json" % project)
+    try:
+        with open(manifest) as f:
+            return fill_image_defaults(json.load(f).get('imageSettings'))
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def substrate_settings(args) -> dict:
@@ -288,8 +436,14 @@ def substrate_settings(args) -> dict:
 
 def depth_only_params(args):
     """PINGMapper parameters with everything except the depth decode switched off."""
+    # Reusing the decode means project_mode 2, which loads the pickled sonObjs
+    # instead of rebuilding them. Two things then become waste rather than
+    # work: the sonogram tile export, which the rectify stage does not read
+    # (it loads intensities straight from the .SON), and the substrate
+    # prediction, whose raster is still sitting in the project untouched.
+    reuse = bool(getattr(args, 'reuse_decode', False))
     return {
-        "project_mode": 1,          # overwrite an existing project of the same name
+        "project_mode": 2 if reuse else 1,  # 2 = update, 1 = overwrite
         "threadCnt": resolve_threads(args),
         "tempC": args.temp,
         "nchunk": 500,
@@ -343,7 +497,8 @@ def depth_only_params(args):
         "maxCrop": False,
         "son_colorMap": "gist_gray",
 
-        "wcp": False, "wcm": False, "wcr": bool(args.sonar_mosaic), "wco": False,
+        "wcp": False, "wcm": False,
+        "wcr": bool(args.sonar_mosaic) and not reuse, "wco": False,
         "waterfall_ss_image": False, "waterfall_ss_video": False,
         "waterfall_di_image": False, "waterfall_di_video": False,
         "tileFile": ".jpg",
@@ -352,13 +507,13 @@ def depth_only_params(args):
         "rubberSheeting": True, "rectMethod": "COG", "rectInterpDist": 50,
 
         # Substrate: prediction feeds the classified raster, which feeds its mosaic.
-        "pred_sub": bool(args.substrate_map), "pltSubClass": False,
-        "map_sub": bool(args.substrate_map),
+        "pred_sub": bool(args.substrate_map) and not reuse, "pltSubClass": False,
+        "map_sub": bool(args.substrate_map) and not reuse,
         "map_class_method": args.substrate_class,
         "export_poly": bool(args.substrate_polygons), "map_predict": 0,
 
         "mosaic": 1 if args.sonar_mosaic else 0,
-        "map_mosaic": 1 if args.substrate_map else 0,
+        "map_mosaic": 0 if reuse else (1 if args.substrate_map else 0),
         "mosaic_nchunk": 0,
         "banklines": False, "coverage": False,
     }
@@ -400,6 +555,258 @@ def _teach_pingmapper_logger_to_be_a_stream():
         def fileno(self):
             return self.terminal.fileno()
         logger.fileno = fileno
+
+
+def prime_project_for_reuse(project_dir, args, plan):
+    """
+    Write into the pickled sonObjs the settings a project_mode 2 run would not
+    otherwise pick up.
+
+    rectify_master_func sets the CLAHE and dB settings onto the rectObj from
+    the run parameters, but not tone_gamma and tone_gain; and read_master_func
+    skips the EGN block entirely when the sonObj already says EGN matches. In
+    project_mode 2 both of those therefore come off the pickle, and a changed
+    gamma or a changed stretch would be silently ignored. That is the one
+    failure this whole path must not have, so the values go in first.
+    """
+    import pickle
+
+    metas = sorted(glob.glob(os.path.join(project_dir, 'meta', '*.meta')))
+    if not metas:
+        raise SystemExit("--reuse-decode needs an already-decoded project; "
+                         "none at %s" % project_dir)
+
+    force_egn = plan['stage'] == 'egn'
+    # The CLAHE normalisation bounds are sampled across the whole survey and
+    # then cached on the sonObj with no invalidation of any kind. They are
+    # taken after the dB transform, so that setting and only that setting
+    # makes them stale.
+    drop_clahe = 'dbTransform' in plan['changed']
+
+    for path in metas:
+        with open(path, 'rb') as f:
+            son = pickle.load(f)
+        son.tone_gamma = float(args.tone_gamma)
+        son.tone_gain = float(args.tone_gain)
+        if force_egn:
+            # read_master_func skips the EGN pass when son.egn already equals
+            # what was asked for. Clearing it is what makes a changed stretch
+            # recompute - and is also the only thing that turns EGN off,
+            # since in project_mode 2 nothing else writes son.egn.
+            son.egn = False
+        if drop_clahe:
+            son._sonar_clahe_global_bounds = None
+        # PINGMapper's smoothTrackline returns the filenames it wrote, except
+        # when the sonObj already carries smthTrkFile - then it prints "Using
+        # existing smoothed trackline" and falls off the end returning None,
+        # and rectify_master_func does `beam in None` two lines later. So the
+        # attribute goes and the trackline is smoothed again: a second and a
+        # half, against reaching into site-packages to fix a bug an upgrade
+        # would undo anyway.
+        if hasattr(son, 'smthTrkFile'):
+            del son.smthTrkFile
+        # And the depth pick has to be redone, cheap as it is to skip.
+        #
+        # project_mode 2 re-derives the ping metadata CSVs from the recording
+        # before it decides what to skip, so dep_m and the columns beside it
+        # are wiped on the way in - and then the depth step, the only thing
+        # that writes them, is skipped because the sonObj says depths were
+        # exported already. The next thing to ask for dep_m is _interpTrack,
+        # in the rectify stage, and it dies on a KeyError. Clearing detectDep
+        # stops that skip firing; the step writes the real value back itself.
+        son.detectDep = -1
+        # Through a temporary file: a half-written pickle is a dead project,
+        # and this runs on every rebuild.
+        tmp = path + '.new'
+        with open(tmp, 'wb') as f:
+            pickle.dump(son, f)
+        os.replace(tmp, path)
+
+    note = "  primed %d sonObj(s): gamma %s, gain %s, depth pick to redo" % (
+        len(metas), args.tone_gamma, args.tone_gain)
+    if force_egn:
+        note += ", EGN statistics to recompute"
+    if drop_clahe:
+        note += ", CLAHE bounds dropped"
+    print(note)
+    if args.depth_source != 'sensor':
+        print("  (the depth pick is 'auto', so redoing it is the slow part of "
+              "this run)")
+
+
+def clear_rect_outputs(project_dir):
+    """
+    Delete the rectified tiles and the sonar mosaic before a reuse run.
+
+    _createMosaic globs the rect_wcr folder rather than taking the chunks it
+    just wrote, so a tile left over from a previous toning would be mosaicked
+    in beside the new ones and nothing would say so. The mosaics themselves
+    are named by index, so a shorter run leaves the tail of a longer one
+    behind. Substrate is not touched: that is the output being reused.
+    """
+    targets = sorted(glob.glob(os.path.join(project_dir, '*', 'rect_wc*')))
+    targets.append(os.path.join(project_dir, 'sonar_mosaic'))
+    removed = 0
+    for path in targets:
+        if os.path.isdir(path):
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    if removed:
+        print("  cleared %d stale rectified output folder(s)" % removed)
+
+
+def limit_rectify_to_chunks(count, at=0.5):
+    """
+    Make the rectify stage work on a short run of chunks instead of all of them.
+
+    The point of a swatch is to answer "does this toning look right" without
+    waiting for the whole survey, and the only honest way to do that is to
+    keep every survey-wide number - the EGN range means, the CLAHE bounds -
+    exactly as the full run computes them, and simply warp less of it. So the
+    limit goes on rectObj._getChunkID, which is what the rectify stage
+    iterates, and nowhere near the read stage, which is where those numbers
+    come from. A swatch toned off swatch-sized statistics would look nothing
+    like the mosaic it is supposed to predict.
+
+    Port and starboard are windowed by chunk id rather than by position in
+    their own lists, so the two beams cover the same water even when filtering
+    has left them with different chunks.
+
+    Returns a dict that gains a 'span' key once the first beam has been asked.
+    """
+    import numpy as np
+    from pingmapper.class_rectObj import rectObj
+
+    original = getattr(rectObj, '_getChunkID_unlimited', rectObj._getChunkID)
+    window = {}
+
+    def limited(self):
+        chunks = original(self)
+        ids = sorted(int(c) for c in chunks)
+        if not ids:
+            return chunks
+        if 'span' not in window:
+            if len(ids) <= count:
+                window['span'] = (ids[0], ids[-1])
+            else:
+                start = int(round(at * (len(ids) - count)))
+                start = max(0, min(start, len(ids) - count))
+                window['span'] = (ids[start], ids[start + count - 1])
+        lo, hi = window['span']
+        kept = np.array([int(c) for c in chunks if lo <= int(c) <= hi], dtype=int)
+        return kept if kept.size else chunks
+
+    rectObj._getChunkID_unlimited = original
+    rectObj._getChunkID = limited
+    return window
+
+
+def write_png_preview(tif_path, png_path, width=1400):
+    """A look at the swatch that opens in anything, beside the GeoTIFF."""
+    try:
+        from osgeo import gdal
+        src = gdal.Open(tif_path)
+        if src is None:
+            return ''
+        scale = min(1.0, width / float(src.RasterXSize or 1))
+        gdal.Translate(png_path, src, format='PNG', outputType=gdal.GDT_Byte,
+                       width=max(1, int(src.RasterXSize * scale)),
+                       height=max(1, int(src.RasterYSize * scale)))
+        src = None
+        return png_path if os.path.isfile(png_path) else ''
+    except Exception as exc:
+        print("  (no PNG preview: %s)" % exc)
+        return ''
+
+
+def forget_full_mosaic(out_dir, project):
+    """
+    Record in the manifest that the full mosaic is gone.
+
+    A swatch rectifies over the tiles the full mosaic was built from and then
+    clears them. Leaving the manifest pointing at mosaics that no longer exist
+    would be merely untidy - cached_products drops missing files - but the
+    manifest's whole job is to be true about what is on disk.
+    """
+    manifest = os.path.join(out_dir, "%s_products.json" % project)
+    try:
+        with open(manifest) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return
+    if not data.get('sonar'):
+        return
+    data['sonar'] = []
+    data['sonarClearedBy'] = 'swatch'
+    with open(manifest, 'w') as f:
+        json.dump(data, f, indent=2)
+    print("  products manifest: full mosaic marked gone, a swatch took its tiles")
+
+
+def run_swatch(args, project_dir, out_dir, project, plan):
+    """
+    Rectify a short run of chunks and leave the result somewhere it can be seen.
+
+    Nothing here is allowed to look like a finished mosaic. A swatch is a few
+    chunks of one survey - which is what makes it quick, and what makes it the
+    wrong thing to ship - so it goes in its own folder, never into the
+    products manifest, and the manifest is told the full mosaic it overwrote
+    is gone.
+    """
+    print("Swatch: %d chunk(s) at %d%% along the survey\n"
+          % (args.swatch, round(args.swatch_at * 100)))
+    prime_project_for_reuse(project_dir, args, plan)
+    clear_rect_outputs(project_dir)
+    window = limit_rectify_to_chunks(args.swatch, args.swatch_at)
+
+    run_pingmapper(args, project_dir)
+
+    sonar, _substrate = find_products(project_dir)
+    # A labelled swatch is one of a set being compared, so it gets its own
+    # folder and leaves the others alone. An unlabelled one is the only
+    # swatch there is, and replaces whatever was there.
+    root = os.path.join(out_dir, "%s_swatch" % project)
+    swatch_dir = os.path.join(root, args.swatch_label) if args.swatch_label else root
+    if os.path.isdir(swatch_dir):
+        shutil.rmtree(swatch_dir, ignore_errors=True)
+    elif not args.swatch_label and os.path.isdir(root):
+        shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(swatch_dir, exist_ok=True)
+
+    moved = []
+    for path in sonar:
+        dest = os.path.join(swatch_dir, os.path.basename(path))
+        shutil.move(path, dest)
+        moved.append(dest)
+
+    preview = ''
+    if moved:
+        preview = write_png_preview(
+            moved[0], os.path.join(swatch_dir, "%s_swatch.png" % project))
+
+    with open(os.path.join(swatch_dir, 'settings.json'), 'w') as f:
+        json.dump({'imageSettings': image_settings(args),
+                   'label': args.swatch_label,
+                   'chunks': args.swatch,
+                   'swatchAt': args.swatch_at,
+                   'chunkIds': list(window.get('span', ())),
+                   'rerunStage': plan['stage']}, f, indent=2)
+
+    clear_rect_outputs(project_dir)
+    forget_full_mosaic(out_dir, project)
+
+    if not moved:
+        raise SystemExit("The swatch run produced no mosaic - see the log above.")
+
+    print("\nSwatch: %s" % swatch_dir)
+    for path in moved:
+        print("  %s" % path)
+    if preview:
+        print("  %s   <- open this one" % preview)
+    print("\nThat is a few chunks, not a mosaic to ship. The full mosaic was "
+          "cleared to make it,\nso the survey needs building again once the "
+          "settings are right.")
+    return preview or moved[0]
 
 
 # A chunk left with fewer pings than this is folded into the one before it.
@@ -472,6 +879,7 @@ def run_pingmapper(args, project_dir):
 
     print(f"PINGMapper: {recording}")
     print(f"  project : {project_dir}")
+    print(f"  mode    : {'update (reusing the decode)' if params['project_mode'] == 2 else 'full decode'}")
     print(f"  depth   : {args.depth_source}{' (smoothed)' if args.smooth else ''}, "
           f"{args.temp} °C\n")
 
@@ -583,10 +991,77 @@ def main(argv=None):
     out_dir = os.path.abspath(args.out_dir or os.path.dirname(recording) or '.')
     project_dir = os.path.join(out_dir, project)
 
-    if not args.keep_existing:
+    # Gamma and gain are applied inside the EGN stretch, so without one they
+    # are dead controls. Easy to miss at the best of times and very easy to
+    # miss while turning a swatch round in seconds.
+    if (args.tone_gamma != 1.0 or args.tone_gain != 1.0) and (
+            not args.egn or args.egn_stretch == 'none'):
+        print("Note: gamma and gain are applied inside the EGN stretch. With "
+              "EGN off or the\n      stretch set to 'none' they do nothing.\n")
+
+    plan = None
+    if args.reuse_decode:
+        cached = cached_image_settings(out_dir, project)
+        if not os.path.isdir(os.path.join(project_dir, 'meta')):
+            raise SystemExit("--reuse-decode needs an already-decoded project; "
+                             "none at %s" % project_dir)
+        plan = plan_rerun(cached, image_settings(args))
+        if plan['stage'] == 'read':
+            if args.swatch:
+                # A swatch never refuses here, because refusing is the one
+                # thing it cannot usefully do: it exists to answer "does this
+                # toning look right", and the toning does not depend on which
+                # pings were decoded. What it shows is the right toning on the
+                # ping set the project already has - so say that plainly and
+                # recompute the EGN statistics, which is what the toning does
+                # depend on. A build still refuses, because a build ships.
+                print("Heads up: %s\n"
+                      "decide which pings are decoded, and this swatch is cut "
+                      "from the decode already\non disk. The toning is what it "
+                      "will be; the coverage is not.\n"
+                      % ", ".join(plan['changed']))
+                plan = {'stage': 'egn', 'changed': plan['changed']}
+            else:
+                raise SystemExit(
+                    "Those settings change which pings are decoded (" +
+                    ", ".join(plan['changed']) + "), so there is nothing to "
+                    "reuse.\nRun without --reuse-decode.")
+        if plan['stage'] == 'none':
+            # Nothing changed - but "nothing to do" only holds if what was
+            # asked for is on disk. A swatch has to rectify whatever the
+            # settings say, and a build whose mosaic a swatch took still owes
+            # that mosaic. In both cases the decode under it is untouched.
+            if args.swatch or (args.sonar_mosaic
+                               and not find_products(project_dir)[0]):
+                plan = {'stage': 'rectify', 'changed': []}
+        print("Reusing the decode: from the %s stage onwards%s\n"
+              % (plan['stage'],
+                 (" (%s changed)" % ", ".join(plan['changed'])
+                  if plan['changed'] else "")))
+        if args.substrate_map:
+            _s, existing = find_products(project_dir)
+            if not existing:
+                raise SystemExit(
+                    "--reuse-decode --substrate-map, but the project has no "
+                    "substrate raster to reuse.\nRun without --reuse-decode.")
+            print("  reusing %d substrate raster(s) already in the project"
+                  % len(existing))
+
+    if args.swatch:
+        run_swatch(args, project_dir, out_dir, project, plan)
+        return
+
+    if args.keep_existing:
+        if not os.path.isdir(project_dir):
+            raise SystemExit(f"--keep-existing given but no project at {project_dir}")
+    elif args.reuse_decode and plan['stage'] == 'none':
+        print("Nothing changed and the mosaic is already on disk - it is "
+              "already what these settings make.")
+    else:
+        if args.reuse_decode:
+            prime_project_for_reuse(project_dir, args, plan)
+            clear_rect_outputs(project_dir)
         run_pingmapper(args, project_dir)
-    elif not os.path.isdir(project_dir):
-        raise SystemExit(f"--keep-existing given but no project at {project_dir}")
 
     meta_csv = find_meta_csv(project_dir)
     print(f"\nMetadata: {meta_csv}")
