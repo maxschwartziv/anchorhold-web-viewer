@@ -43,7 +43,7 @@ import workspace                 # the recordings folder, set once
 import appicon                   # the window icon, on every window
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 pipeline_dir = os.path.dirname(os.path.abspath(__file__))
 repo_dir = os.path.dirname(pipeline_dir)
@@ -61,6 +61,12 @@ DEFAULT_TIMEZONE = 'America/Hermosillo'
 DEFAULT_WATER_TEMP = 10.0
 
 DEPTH_SCRIPT = os.path.join(pipeline_dir, 'depth_csv_from_sonar.py')
+
+# How many chunks a test swatch rectifies. At PINGMapper's 500 pings per chunk
+# that is 1,500 pings - a few hundred metres of both beams, enough to judge a
+# toning on and small enough to come back while the settings window is still
+# open.
+SWATCH_CHUNKS = 3
 ROCK_SCRIPT = os.path.join(pipeline_dir, 'rock_map.py')
 GHOST_SCRIPT = os.path.join(pipeline_dir, 'ghost_vision.py')
 # PINGVerter's SUPPORTED_SONAR_EXTENSIONS, and nothing else: a filter that
@@ -367,25 +373,49 @@ def default_values(group):
     return {p.key: p.default for p in PARAMS[group]}
 
 
+# A saved preset's key is its name behind this, so it can never collide with a
+# built-in one and so a stored survey says plainly which kind it came from.
+SAVED = 'saved:'
+
+
+def all_presets(group):
+    """
+    The presets on offer: the built-in ones, then the ones saved by hand.
+
+    Both are the same thing - a name and a set of values - so they go through
+    one list and everything downstream stops caring which is which. The saved
+    ones come second because a built-in is what someone means by its name.
+    """
+    presets = list(PRESETS[group])
+    saved = workspace.saved_presets().get(group, {})
+    for name in sorted(saved, key=str.lower):
+        presets.append((SAVED + name, name + '  (saved)', dict(saved[name])))
+    return presets
+
+
 def preset_values(group, key):
     """The full set of values a preset stands for."""
     values = default_values(group)
-    for name, _label, overrides in PRESETS[group]:
+    for name, _label, overrides in all_presets(group):
         if name == key:
+            # A built-in lists only what it changes; a saved one lists
+            # everything. Laying either over the defaults gives the same
+            # answer, and a saved preset made before a setting existed
+            # quietly picks up that setting's default.
             values.update(overrides)
             break
     return values
 
 
 def preset_label(group, key):
-    for name, label, _values in PRESETS[group]:
+    for name, label, _values in all_presets(group):
         if name == key:
             return label
     return CUSTOM
 
 
 def preset_key(group, label):
-    for name, text, _values in PRESETS[group]:
+    for name, text, _values in all_presets(group):
         if text == label:
             return name
     return 'custom'
@@ -393,10 +423,16 @@ def preset_key(group, label):
 
 def matching_preset(group, values):
     """Which preset these values are, if they are one."""
-    for name, _label, _overrides in PRESETS[group]:
+    for name, _label, _overrides in all_presets(group):
         if preset_values(group, name) == values:
             return name
     return 'custom'
+
+
+def saved_preset_name(key):
+    """The name behind a saved preset's key, or '' for a built-in."""
+    return key[len(SAVED):] if isinstance(key, str) and key.startswith(SAVED) else ''
+
 
 
 def default_processing():
@@ -492,6 +528,50 @@ def time_filter_for(recording: str) -> str:
     return ''
 
 
+def swatch_at_for(recording: str) -> float:
+    """
+    Where along the survey a swatch should be cut, 0 to 1.
+
+    The Fixer writes this beside the recording when a spot is picked on its
+    map, the same way it writes the time filter: having already pointed at
+    the water you want to look at, nobody should have to describe it again
+    here. Half way along when it has not been asked.
+
+    It is a fraction of the kept pings, not of the file, so it keeps meaning
+    roughly the same place after a stretch is thrown away.
+    """
+    if not recording or not os.path.isfile(recording):
+        return 0.5
+    stem = os.path.splitext(recording)[0]
+    for candidate in (stem + '_swatch.json', stem + '_fixed_swatch.json'):
+        try:
+            with open(candidate) as f:
+                at = float(json.load(f).get('at'))
+            return min(1.0, max(0.0, at))
+        except (OSError, ValueError, TypeError):
+            continue
+    return 0.5
+
+
+def set_swatch_at(recording: str, at: float) -> str:
+    """
+    Remember where this recording's swatch is cut, beside the recording.
+
+    The same file the Fixer writes, so moving the spot here and picking it
+    there are the same act and neither overrules the other - whichever was
+    done last is where the next swatch comes from.
+    """
+    if not recording or not os.path.isfile(recording):
+        return ''
+    path = os.path.splitext(recording)[0] + '_swatch.json'
+    try:
+        with open(path, 'w') as f:
+            json.dump({'at': round(min(1.0, max(0.0, float(at))), 4)}, f, indent=1)
+    except OSError:
+        return ''
+    return path
+
+
 def decode_flags(processing, sonar_mosaic=False, substrate_map=False,
                  time_filter=''):
     """The depth_csv_from_sonar.py flags for one survey's choices."""
@@ -516,17 +596,24 @@ def ghost_flags(processing):
     return flags_for('ghost', processing['ghost']['values'])
 
 
-def decode_settings(processing, sonar_mosaic=False, substrate_map=False):
+def decode_settings(processing, sonar_mosaic=False, substrate_map=False,
+                    time_filter=''):
     """
     What those flags resolve to, asked of the tool that will run them.
 
     Resolving them there rather than restating them here means the two cannot
     drift: a preset that changes changes in one place, and what is compared
     against an earlier run is what that run actually recorded.
+
+    [time_filter] has to be passed for the same reason. A Fixer edit is found
+    beside the recording rather than set in this window, so it is easy to
+    leave out of the comparison - and leaving it out means every survey that
+    has one compares unequal to its own manifest, for ever.
     """
     import depth_csv_from_sonar
     args = depth_csv_from_sonar.parse_args(
-        ['(settings only)'] + decode_flags(processing, sonar_mosaic, substrate_map))
+        ['(settings only)'] + decode_flags(processing, sonar_mosaic,
+                                           substrate_map, time_filter))
     return {'image': depth_csv_from_sonar.image_settings(args),
             'substrate': depth_csv_from_sonar.substrate_settings(args)}
 
@@ -543,7 +630,11 @@ def cached_decode_settings(csv_path):
             data = json.load(f)
     except (OSError, ValueError):
         return {}
-    return {'image': data.get('imageSettings'),
+    # Through the same filler the tool uses, so a manifest that predates a
+    # setting is not read here as that setting having changed.
+    import depth_csv_from_sonar
+    return {'image': depth_csv_from_sonar.fill_image_defaults(
+                data.get('imageSettings')),
             'substrate': data.get('substrateSettings')}
 
 
@@ -559,6 +650,46 @@ def same_processing(cached, wanted, sonar_mosaic=False, substrate_map=False):
     if substrate_map and cached.get('substrate') != wanted['substrate']:
         return False
     return True
+
+
+def fast_path_plan(csv_path, cached, wanted, sonar_mosaic, substrate_map,
+                   cached_substrate, cached_sonar=None):
+    """
+    Whether this rebuild can keep the decode, and what it would restart from.
+
+    Most of the mosaic panel is applied while a chunk is being warped and
+    never touches the decode, so changing it does not justify reading the
+    recording again - still less predicting substrate again, which is the
+    bulk of a run and has nothing to do with how the mosaic is toned.
+
+    Only when: a mosaic is being made at all, the substrate half of the build
+    is either not wanted or already on disk classified the same way, and every
+    changed setting is one that is applied downstream of the decode.
+
+    Returns depth_csv_from_sonar's plan dict, or None when the full run is
+    the only honest answer.
+    """
+    import depth_csv_from_sonar
+    suffix = "_depth.csv"
+    if not sonar_mosaic or not csv_path or not csv_path.endswith(suffix):
+        return None
+    if not os.path.isfile(csv_path):
+        return None
+    # The decode to be kept is the PINGMapper project beside the CSV.
+    if not os.path.isdir(os.path.join(csv_path[: -len(suffix)], 'meta')):
+        return None
+    if substrate_map and not (cached_substrate and
+                              cached.get('substrate') == wanted['substrate']):
+        return None
+    plan = depth_csv_from_sonar.plan_rerun(cached.get('image'), wanted['image'])
+    if plan['stage'] == 'none' and not cached_sonar:
+        # Nothing changed, but there is no mosaic on disk - a swatch took its
+        # tiles. The decode under it is untouched, so all that is owed is the
+        # rectify. This is the case that makes the swatch worth having: try
+        # four tonings, then build, and the build is a minute rather than the
+        # whole survey again.
+        plan = {'stage': 'rectify', 'changed': []}
+    return plan if plan['stage'] in ('rectify', 'egn') else None
 
 # The original survey, which keeps its flat asset names from before this GUI existed.
 LEGACY_ENTRY = {
@@ -663,7 +794,7 @@ def conda_env_environment(python_exe):
 def run_pingmapper_products(recording, out_dir, log, cancel,
                             temp=DEFAULT_WATER_TEMP, auto_depth=False,
                             sonar_mosaic=False, substrate_map=False,
-                            processing=None):
+                            processing=None, reuse=None):
     """
     Produce the survey layers locally from a raw recording.
 
@@ -688,8 +819,12 @@ def run_pingmapper_products(recording, out_dir, log, cancel,
         cmd += ['--depth-source', 'auto']
     if sonar_mosaic:
         cmd += ['--sonar-mosaic']
-    if substrate_map:
+    if substrate_map and not reuse:
         cmd += ['--substrate-map']
+    if reuse:
+        # Without --substrate-map above, the rasters already in the project
+        # are picked up as they stand instead of being predicted again.
+        cmd += ['--reuse-decode']
     # Tone, track filtering and substrate classification. Left off, PINGMapper
     # writes a mosaic with the nadir ribbon and edge falloff still in it, and
     # no two passes match where they overlap.
@@ -700,6 +835,10 @@ def run_pingmapper_products(recording, out_dir, log, cancel,
     cmd += decode_flags(processing, sonar_mosaic, substrate_map, time_filter)
 
     wanted = ['depth map'] + (['side scan mosaic'] if sonar_mosaic else [])         + (['substrate map'] if substrate_map else [])
+    if reuse:
+        log("Re-toning the mosaic from the %s stage - keeping the decode%s."
+            % (reuse['stage'], ", and the substrate map" if substrate_map else ""))
+        log("  changed: " + ", ".join(reuse['changed']))
     log("Running PINGMapper for: " + ", ".join(wanted) + " ...")
     if sonar_mosaic:
         log("  mosaic image: " + describe_choice('mosaic', processing['mosaic']))
@@ -711,20 +850,8 @@ def run_pingmapper_products(recording, out_dir, log, cancel,
         log("  substrate:    " + describe_choice('substrate',
                                                  processing['substrate']))
     log("  " + " ".join(cmd) + "\n")
-    proc = subprocess.Popen(cmd, cwd=repo_dir, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, bufsize=1,
-                            encoding='utf-8', errors='replace',
-                            env=conda_env_environment(python))
-    try:
-        for line in proc.stdout:
-            log(line.rstrip())
-            if cancel.is_set():
-                proc.terminate()
-                raise RuntimeError("Stopped by user")
-    finally:
-        proc.stdout.close()
-    if proc.wait() != 0:
-        raise RuntimeError("PINGMapper could not decode that recording - see the log above")
+    _stream(cmd, python, log, cancel,
+            "PINGMapper could not decode that recording - see the log above")
     if not os.path.isfile(csv_path):
         raise RuntimeError(f"No depth CSV produced at {csv_path}")
     products = {'csv': csv_path, 'sonar': [], 'substrate': []}
@@ -746,6 +873,158 @@ def run_pingmapper_products(recording, out_dir, log, cancel,
         log(f"Substrate map: {len(products['substrate'])} raster(s)")
     log("")
     return products
+
+
+def _stream(cmd, python, log, cancel, failure):
+    """Run a PINGMapper-env subprocess, streaming its output into the log."""
+    proc = subprocess.Popen(cmd, cwd=repo_dir, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            encoding='utf-8', errors='replace',
+                            env=conda_env_environment(python))
+    try:
+        for line in proc.stdout:
+            log(line.rstrip())
+            if cancel.is_set():
+                proc.terminate()
+                raise RuntimeError("Stopped by user")
+    finally:
+        proc.stdout.close()
+    if proc.wait() != 0:
+        raise RuntimeError(failure)
+
+
+def run_swatch_preview(recording, out_dir, log, cancel, processing,
+                       chunks=SWATCH_CHUNKS, at=0.5, temp=DEFAULT_WATER_TEMP,
+                       label=''):
+    """
+    Rectify a few chunks with the settings as they stand, and hand back a PNG.
+
+    The survey-wide numbers - the EGN range means, the CLAHE bounds - are the
+    ones the full run works out, so what comes back is toned exactly as the
+    whole mosaic would be. It is a few hundred metres of it, not a mosaic:
+    it goes in its own folder and never into the products manifest.
+
+    Making one costs the full mosaic on disk, because it rectifies over the
+    tiles that mosaic was built from. That is why this is a button in the
+    settings window and not something a build does quietly.
+    """
+    check_recording_data(recording)
+    python = find_pingmapper_python()
+    project = os.path.splitext(os.path.basename(recording))[0]
+    work_dir = os.path.join(out_dir, 'pingmapper')
+    if not os.path.isdir(os.path.join(work_dir, project, 'meta')):
+        raise RuntimeError(
+            "A swatch is cut from an already-decoded survey, and this one has "
+            "not been decoded yet.\nBuild it once, then the settings can be "
+            "turned round in seconds.")
+
+    cmd = [python, '-u', DEPTH_SCRIPT, recording,
+           '--out-dir', work_dir, '--project', project,
+           '--temp', str(float(temp)),
+           '--swatch', str(int(chunks)), '--swatch-at', repr(float(at))]
+    if label:
+        cmd += ['--swatch-label', label]
+    cmd += decode_flags(processing, True, False, time_filter_for(recording))
+
+    log("Swatch: " + describe_choice('mosaic', processing['mosaic']))
+    log("  " + " ".join(cmd) + "\n")
+    _stream(cmd, python, log, cancel,
+            "The swatch could not be made - see the log above")
+
+    swatch_dir = os.path.join(work_dir, project + '_swatch')
+    if label:
+        swatch_dir = os.path.join(swatch_dir, label)
+    png = os.path.join(swatch_dir, project + '_swatch.png')
+    if os.path.isfile(png):
+        return png
+    tifs = sorted(glob.glob(os.path.join(swatch_dir, '*.tif')))
+    if tifs:
+        return tifs[0]
+    raise RuntimeError("The swatch run left nothing behind - see the log above")
+
+
+def safe_label(name):
+    """A preset's name as a folder can be called."""
+    out = re.sub(r'[^A-Za-z0-9 _-]+', '', str(name)).strip().replace(' ', '_')
+    return out[:40] or 'preset'
+
+
+def contact_sheet(panels, out_path, width=1500):
+    """
+    One image of several swatches, each captioned, stacked down the page.
+
+    Side by side is the only way to judge a toning: on its own almost any of
+    them looks plausible, and the difference between two is obvious the
+    moment they are the same water at the same scale. So they are drawn at
+    one width, in the order they were cut.
+
+    [panels] is [(caption, png path)]. Returns the path, or '' if there was
+    nothing to draw.
+    """
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return ''
+    loaded = []
+    for caption, path in panels:
+        try:
+            img = Image.open(path).convert('RGB')
+        except Exception:
+            continue
+        scale = width / float(img.width or 1)
+        loaded.append((caption, img.resize(
+            (width, max(1, int(img.height * scale))), Image.LANCZOS)))
+    if not loaded:
+        return ''
+
+    bar = 34                       # the caption strip above each panel
+    gap = 10
+    total = sum(img.height + bar for _c, img in loaded) + gap * (len(loaded) - 1)
+    sheet = Image.new('RGB', (width, total), (18, 18, 18))
+    draw = ImageDraw.Draw(sheet)
+    y = 0
+    for caption, img in loaded:
+        draw.rectangle([0, y, width, y + bar], fill=(32, 32, 32))
+        draw.text((10, y + 10), caption, fill=(235, 235, 235))
+        sheet.paste(img, (0, y + bar))
+        y += bar + img.height + gap
+    sheet.save(out_path)
+    return out_path
+
+
+def run_swatch_set(recording, out_dir, log, cancel, processing, choices,
+                   chunks=SWATCH_CHUNKS, at=0.5, temp=DEFAULT_WATER_TEMP):
+    """
+    Cut one swatch per chosen preset, then put them on one sheet.
+
+    Each is a separate run of the decode's rectify stage over the same few
+    chunks, so this costs about a minute per preset. They are cut from the
+    same water at the same position for the same reason the sheet exists:
+    the only question worth asking of a toning is which of these looks
+    better, and that question needs them to differ in nothing else.
+    """
+    panels = []
+    for i, (label, values) in enumerate(choices, 1):
+        if cancel.is_set():
+            raise RuntimeError("Stopped by user")
+        log("\n===== %d of %d: %s" % (i, len(choices), label))
+        one = dict(processing)
+        one['mosaic'] = {'preset': matching_preset('mosaic', values),
+                         'values': values}
+        png = run_swatch_preview(recording, out_dir, log, cancel, one,
+                                 chunks=chunks, at=at, temp=temp,
+                                 label=safe_label(label))
+        panels.append((label, png))
+
+    project = os.path.splitext(os.path.basename(recording))[0]
+    sheet = os.path.join(out_dir, 'pingmapper', project + '_swatch',
+                         'compare.png')
+    made = contact_sheet(panels, sheet)
+    if made:
+        log("\nAll %d on one sheet: %s" % (len(panels), made))
+        return made
+    log("\nNo sheet could be drawn; the swatches are in their own folders.")
+    return panels[0][1] if panels else ''
 
 
 def cached_products(csv_path):
@@ -1304,10 +1583,14 @@ class ProcessingDialog(tk.Toplevel):
     preset here is a set of values with a name on it and nothing more.
     """
 
-    def __init__(self, parent, group, choice, on_ok):
+    def __init__(self, parent, group, choice, on_ok, on_swatch=None,
+                 swatch_at=0.5):
         super().__init__(parent)
         self.group = group
         self.on_ok = on_ok
+        # Only the mosaic panel has anything a swatch could show.
+        self.on_swatch = on_swatch
+        self.var_at = tk.StringVar(value=str(int(round(swatch_at * 100))))
         self.transient(parent)
         self.title(GROUP_TITLES[group])
         self.geometry('700x620')
@@ -1321,7 +1604,7 @@ class ProcessingDialog(tk.Toplevel):
             value=describe_choice(group, choice))
         self.cmb = ttk.Combobox(
             top, textvariable=self.var_preset, state='readonly', width=44,
-            values=[label for _key, label, _values in PRESETS[group]] + [CUSTOM])
+            values=self._preset_labels())
         self.cmb.pack(side='left', padx=(6, 0))
         self.cmb.bind('<<ComboboxSelected>>', self._preset_picked)
         ttk.Label(top, text='fills the fields below', foreground='#777777').pack(
@@ -1364,10 +1647,98 @@ class ProcessingDialog(tk.Toplevel):
         ttk.Button(feet, text='OK', command=self._ok).pack(side='right', padx=(0, 6))
         ttk.Button(feet, text='Back to recommended',
                    command=self._recommended).pack(side='left')
+        ttk.Button(feet, text='Save preset',
+                   command=self._save_preset).pack(side='left', padx=(6, 0))
+        self.btn_delete = ttk.Button(feet, text='Delete preset',
+                                     command=self._delete_preset)
+        self.btn_delete.pack(side='left', padx=(6, 0))
 
+        if self.on_swatch is not None:
+            # Where along the survey the few chunks come from. Not a mosaic
+            # setting - it changes which water is shown, not how it is toned -
+            # so it sits with the swatch buttons and stays out of the values
+            # a survey records.
+            swatch = ttk.Frame(self, padding=(10, 0, 10, 8))
+            swatch.pack(fill='x')
+            ttk.Button(swatch, text='Test swatch',
+                       command=self._swatch).pack(side='left')
+            ttk.Button(swatch, text='Swatch several presets',
+                       command=self._swatch_many).pack(side='left', padx=(6, 0))
+            ttk.Label(swatch, text='cut at').pack(side='left', padx=(14, 4))
+            ttk.Entry(swatch, textvariable=self.var_at, width=5).pack(side='left')
+            ttk.Label(swatch, text='% along the survey  '
+                                   '(or pick the spot on the Fixer\'s map)',
+                      foreground='#666666').pack(side='left', padx=(4, 0))
+
+        self._sync_preset_buttons()
         self.protocol('WM_DELETE_WINDOW', self.destroy)
         self.bind('<Escape>', lambda _e: self.destroy())
         self.grab_set()
+
+    def _preset_labels(self):
+        return [label for _key, label, _values in all_presets(self.group)] + [CUSTOM]
+
+    def _reload_presets(self, select_label=None):
+        """Put the list back after one was saved or deleted."""
+        self.cmb.configure(values=self._preset_labels())
+        if select_label is not None:
+            self.var_preset.set(select_label)
+        self._sync_preset_buttons()
+
+    def _sync_preset_buttons(self):
+        """Delete only offers itself for a preset there is something to delete."""
+        if not hasattr(self, 'btn_delete'):
+            return
+        name = saved_preset_name(preset_key(self.group, self.var_preset.get()))
+        self.btn_delete.configure(state='normal' if name else 'disabled')
+
+    def _save_preset(self):
+        """Keep what is in the fields under a name, for any survey to use."""
+        try:
+            values = self._values()
+        except ValueError as exc:
+            messagebox.showerror(GROUP_TITLES[self.group], str(exc), parent=self)
+            return
+        current = saved_preset_name(preset_key(self.group, self.var_preset.get()))
+        name = simpledialog.askstring(
+            "Save preset",
+            "A name for these settings.\n\n"
+            "Saved presets are kept for this computer, not for one survey, so "
+            "the name shows up in every survey's list.",
+            initialvalue=current, parent=self)
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            return
+        if any(name == label for _k, label, _v in PRESETS[self.group]):
+            messagebox.showerror(
+                "Save preset",
+                "That is a built-in preset's name. Pick another so the two "
+                "are not confusable.", parent=self)
+            return
+        existing = workspace.saved_presets().get(self.group, {})
+        if name in existing and not messagebox.askokcancel(
+                "Save preset", "Replace the saved preset '%s'?" % name,
+                parent=self):
+            return
+        workspace.save_preset(self.group, name, values)
+        self._reload_presets(preset_label(self.group, SAVED + name))
+
+    def _delete_preset(self):
+        name = saved_preset_name(preset_key(self.group, self.var_preset.get()))
+        if not name:
+            return
+        if not messagebox.askokcancel(
+                "Delete preset",
+                "Forget the saved preset '%s'?\n\n"
+                "The values stay in the fields, and every survey built with "
+                "them keeps them - only the name goes." % name, parent=self):
+            return
+        workspace.delete_preset(self.group, name)
+        # The values are left exactly as they are: deleting a name should not
+        # silently change what is about to be run.
+        self._reload_presets(CUSTOM)
 
     def _add_param(self, parent, param, value):
         frame = ttk.Frame(parent)
@@ -1396,6 +1767,7 @@ class ProcessingDialog(tk.Toplevel):
 
     def _preset_picked(self, _event=None):
         key = preset_key(self.group, self.var_preset.get())
+        self._sync_preset_buttons()
         if key == 'custom':
             return
         self._fill(preset_values(self.group, key))
@@ -1425,6 +1797,7 @@ class ProcessingDialog(tk.Toplevel):
         self.var_preset.set(describe_choice(
             self.group, {'preset': matching_preset(self.group, self._values(True)),
                          'values': {}}))
+        self._sync_preset_buttons()
 
     def _values(self, lenient=False):
         values = {}
@@ -1444,6 +1817,36 @@ class ProcessingDialog(tk.Toplevel):
                     values[param.key] = param.default
         return values
 
+    def _swatch_at(self):
+        """The position box as a fraction, falling back to the middle."""
+        try:
+            return min(1.0, max(0.0, float(self.var_at.get()) / 100.0))
+        except (TypeError, ValueError):
+            return 0.5
+
+    def _swatch(self):
+        """Cut a swatch with what is in the fields, without closing the window."""
+        try:
+            values = self._values()
+        except ValueError as exc:
+            messagebox.showerror(GROUP_TITLES[self.group], str(exc), parent=self)
+            return
+        self.on_swatch([(describe_choice(self.group,
+                                         {'preset': matching_preset(self.group, values),
+                                          'values': values}), values)],
+                       self._swatch_at())
+
+    def _swatch_many(self):
+        """Cut one swatch per chosen preset and put them on one sheet."""
+        try:
+            values = self._values()
+        except ValueError as exc:
+            messagebox.showerror(GROUP_TITLES[self.group], str(exc), parent=self)
+            return
+        at = self._swatch_at()
+        PresetPickerDialog(self, self.group, values,
+                           lambda chosen: self.on_swatch(chosen, at))
+
     def _ok(self):
         try:
             values = self._values()
@@ -1453,6 +1856,62 @@ class ProcessingDialog(tk.Toplevel):
         self.on_ok({'preset': matching_preset(self.group, values),
                     'values': values})
         self.destroy()
+
+
+class PresetPickerDialog(tk.Toplevel):
+    """
+    Which tonings to cut, when cutting more than one.
+
+    Every preset is offered, saved ones included, plus what is in the fields
+    now - because the usual reason to compare is that you have been fiddling
+    and want to know whether the fiddling helped.
+    """
+
+    def __init__(self, parent, group, current_values, on_ok):
+        super().__init__(parent)
+        self.on_ok = on_ok
+        self.transient(parent)
+        self.title('Swatch several presets')
+        self.resizable(False, False)
+
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill='both', expand=True)
+        ttk.Label(body, text='Cut one swatch for each of these, then show '
+                             'them on one sheet.', wraplength=420,
+                  justify='left').pack(anchor='w')
+        ttk.Label(body, text='About a minute each.', foreground='#996600').pack(
+            anchor='w', pady=(2, 8))
+
+        self.rows = []
+        for key, label, _values in all_presets(group):
+            var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(body, text=label, variable=var).pack(anchor='w')
+            self.rows.append((var, label, preset_values(group, key)))
+
+        # What is on screen now, when it is not already one of the above.
+        if matching_preset(group, current_values) == 'custom':
+            var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(body, text=CUSTOM, variable=var).pack(anchor='w')
+            self.rows.append((var, 'Values in the window', dict(current_values)))
+
+        feet = ttk.Frame(self, padding=(12, 0, 12, 12))
+        feet.pack(fill='x')
+        ttk.Button(feet, text='Cancel', command=self.destroy).pack(side='right')
+        ttk.Button(feet, text='Cut them',
+                   command=self._ok).pack(side='right', padx=(0, 6))
+
+        self.protocol('WM_DELETE_WINDOW', self.destroy)
+        self.bind('<Escape>', lambda _e: self.destroy())
+        self.grab_set()
+
+    def _ok(self):
+        chosen = [(label, values) for var, label, values in self.rows if var.get()]
+        if not chosen:
+            messagebox.showinfo('Swatch several presets',
+                                'Tick at least one.', parent=self)
+            return
+        self.destroy()
+        self.on_ok(chosen)
 
 
 class SurveyPickerDialog(tk.Toplevel):
@@ -1570,6 +2029,7 @@ class LocationGUI(tk.Tk):
         self.var_zoom_max = tk.StringVar(value='highest')
         self.var_default = tk.BooleanVar(value=False)
         self.var_installed = tk.StringVar(value='')
+        self.var_build_cost = tk.StringVar(value='')
         self.var_status = tk.StringVar(value='')
         self.var_tide_mode = tk.StringVar(value='none')
         self.var_tide_key = tk.StringVar(value=os.environ.get('WORLDTIDES_API_KEY', ''))
@@ -1707,6 +2167,13 @@ class LocationGUI(tk.Tk):
                    command=self._build_and_install).pack(side='left')
         ttk.Button(actions, text="Make chart bundle",
                    command=self._make_bundle).pack(side='left', padx=(6, 0))
+        # What Build is about to do. Most changes to the mosaic settings are
+        # applied while a chunk is warped and do not need the recording read
+        # again, so the difference between the two is minutes - worth knowing
+        # before the button is pressed rather than after.
+        self.lbl_build_cost = ttk.Label(actions, textvariable=self.var_build_cost,
+                                        foreground='#666666')
+        self.lbl_build_cost.pack(side='left', padx=(14, 0))
         ttk.Label(det, textvariable=self.var_installed, foreground='#336633',
                   wraplength=620, justify='left').grid(row=r + 1, column=0, columnspan=3, sticky='w')
 
@@ -2095,7 +2562,81 @@ class LocationGUI(tk.Tk):
             self.var_choice[group].set(describe_choice(group, choice))
             self._commit_form()
 
-        ProcessingDialog(self, group, self.processing[group], taken)
+        ProcessingDialog(self, group, self.processing[group], taken,
+                         on_swatch=self._run_swatch if group == 'mosaic' else None,
+                         swatch_at=swatch_at_for(self.var_depth_input.get().strip()))
+
+    def _run_swatch(self, choices, at=0.5):
+        """
+        Rectify a few chunks per chosen toning, and open what comes back.
+
+        One choice opens the swatch; several open a sheet with all of them on
+        it. Deliberately destructive of the mosaic on disk, and said so before
+        it runs: the swatch is warped over the tiles that mosaic was made
+        from. Iterating on toning is worth that; doing it by accident is not.
+        """
+        if self.current is None:
+            return
+        recording = self.var_depth_input.get().strip()
+        if not is_recording(recording):
+            messagebox.showinfo(
+                GROUP_TITLES['mosaic'],
+                "A swatch is cut from a raw recording. This survey's depth "
+                "input is a CSV, so there is no sonar here to re-tone.")
+            return
+        out_dir = self._out_dir(self.entries[self.current]['id'])
+        if not os.path.isdir(os.path.join(
+                out_dir, 'pingmapper',
+                os.path.splitext(os.path.basename(recording))[0], 'meta')):
+            messagebox.showinfo(
+                GROUP_TITLES['mosaic'],
+                "This survey has not been decoded yet, and a swatch is cut "
+                "from a decode.\n\nBuild it once; after that the mosaic "
+                "settings can be turned round in seconds.")
+            return
+        how_many = ("%d chunks" % SWATCH_CHUNKS if len(choices) == 1 else
+                    "%d chunks for each of %d tonings" % (SWATCH_CHUNKS, len(choices)))
+        how_long = ("about a minute" if len(choices) == 1 else
+                    "about %d minutes" % len(choices))
+        if not messagebox.askokcancel(
+                GROUP_TITLES['mosaic'],
+                "Rectify %s at %d%% along the survey, and open the result?\n\n"
+                "It takes %s. The full mosaic on disk is cleared to make it, "
+                "so the survey will need building again once the settings are "
+                "right." % (how_many, round(at * 100), how_long)):
+            return
+
+        # The spot travels with the recording, so the next swatch - here or in
+        # the Fixer - starts where this one was cut.
+        set_swatch_at(recording, at)
+
+        try:
+            temp = float(self.var_temp.get())
+        except (TypeError, ValueError):
+            temp = DEFAULT_WATER_TEMP
+        processing = dict(self.processing)
+
+        def work(log, cancel):
+            if len(choices) == 1:
+                one = dict(processing)
+                one['mosaic'] = {
+                    'preset': matching_preset('mosaic', choices[0][1]),
+                    'values': choices[0][1]}
+                return run_swatch_preview(recording, out_dir, log, cancel,
+                                          one, temp=temp, at=at)
+            return run_swatch_set(recording, out_dir, log, cancel, processing,
+                                  choices, at=at, temp=temp)
+
+        def done(path):
+            if not path or not os.path.isfile(path):
+                return
+            try:
+                os.startfile(path)
+            except Exception:
+                messagebox.showinfo(GROUP_TITLES['mosaic'], "Swatch: " + path)
+
+        TaskDialog(self, "Test swatch" if len(choices) == 1
+                   else "Swatch %d presets" % len(choices), work, done)
 
     def _load_form(self, index):
         self.current = index
@@ -2132,6 +2673,7 @@ class LocationGUI(tk.Tk):
         self._refresh_tide_info()
         self.var_default.set(e['id'] == self.default_id)
         self._refresh_installed_label()
+        self._refresh_build_cost()
 
     def _commit_form(self):
         if self.current is None or self.current >= len(self.entries):
@@ -2182,6 +2724,7 @@ class LocationGUI(tk.Tk):
             e['tide'] = {'mode': 'none'}
         if self.var_default.get():
             self.default_id = e['id']
+        self._refresh_build_cost()
         if json.dumps(e, sort_keys=True) != before:
             self._set_dirty(True)
             self.listbox.delete(self.current)
@@ -2459,7 +3002,8 @@ class LocationGUI(tk.Tk):
         make_ghost = bool(gen.get('ghost'))
         make_down = bool(gen.get('down', True))
         processing = processing_of(entry)
-        wanted_settings = decode_settings(processing, make_sonar, make_substrate)
+        wanted_settings = decode_settings(processing, make_sonar, make_substrate,
+                                          time_filter_for(recording))
         tide = 'guaymas' if (entry.get('tide') or {}).get('mode') == 'guaymas' else 'none'
         # Reuse an already-decoded CSV so a rebuild after tweaking settings is quick.
         cached_csv = self._recording_csv_path()
@@ -2476,8 +3020,9 @@ class LocationGUI(tk.Tk):
                 # some other way, is not what is being asked for. Reusing it is
                 # how changing a setting and pressing build again looks exactly
                 # like the setting doing nothing.
+                cached_settings = cached_decode_settings(cached_csv)
                 same_settings = same_processing(
-                    cached_decode_settings(cached_csv), wanted_settings,
+                    cached_settings, wanted_settings,
                     make_sonar, make_substrate)
                 reusable = (cached_csv and os.path.isfile(cached_csv)
                             and (not make_sonar or cached_sonar)
@@ -2491,14 +3036,22 @@ class LocationGUI(tk.Tk):
                     local_sonar = cached_sonar
                     local_substrate = cached_substrate
                 else:
-                    if (cached_sonar or cached_substrate) and not same_settings:
+                    # A changed setting does not always mean a changed decode.
+                    # Most of the mosaic panel is applied while a chunk is
+                    # warped, so the recording, the depth pick and the
+                    # substrate map can all stand.
+                    reuse = fast_path_plan(
+                        cached_csv, cached_settings, wanted_settings,
+                        make_sonar, make_substrate, cached_substrate,
+                        cached_sonar)
+                    if not reuse and (cached_sonar or cached_substrate) and not same_settings:
                         log("What is on disk was built with different settings "
                             "- decoding again.")
                     products = run_pingmapper_products(
                         recording, out_dir, log, cancel,
                         temp=temp, auto_depth=auto_depth,
                         sonar_mosaic=make_sonar, substrate_map=make_substrate,
-                        processing=processing)
+                        processing=processing, reuse=reuse)
                     depth_csv = products['csv']
                     local_sonar = products['sonar']
                     local_substrate = products['substrate']
@@ -2683,6 +3236,60 @@ class LocationGUI(tk.Tk):
         self._set_dirty(True)
         self._refresh_installed_label()
         self.var_status.set("Installed - save locations.json, then rebuild the app")
+
+    def _build_cost(self):
+        """
+        What pressing Build now would cost, as (text, colour).
+
+        Worked out the same way the build works it out - the products manifest
+        against the settings in the form - so what it says and what happens
+        cannot drift apart.
+        """
+        if self.current is None:
+            return '', '#666666'
+        recording = self.var_depth_input.get().strip()
+        if not is_recording(recording):
+            return '', '#666666'          # a CSV input decodes nothing
+
+        make_sonar = bool(self.var_make_sonar.get())
+        make_substrate = bool(self.var_make_substrate.get())
+        cached_csv = self._recording_csv_path()
+        if not cached_csv or not os.path.isfile(cached_csv):
+            return 'Next build: full decode (nothing decoded yet)', '#666666'
+
+        cached_sonar, cached_substrate = cached_products(cached_csv)
+        cached = cached_decode_settings(cached_csv)
+        wanted = decode_settings(self.processing, make_sonar, make_substrate,
+                                 time_filter_for(recording))
+        if (same_processing(cached, wanted, make_sonar, make_substrate)
+                and (not make_sonar or cached_sonar)
+                and (not make_substrate or cached_substrate)):
+            return 'Next build: nothing to decode again', '#2f6f3f'
+
+        plan = fast_path_plan(cached_csv, cached, wanted, make_sonar,
+                              make_substrate, cached_substrate, cached_sonar)
+        if plan and plan['stage'] == 'rectify':
+            return ('Next build: re-tones the mosaic only, about a minute',
+                    '#2f6f3f')
+        if plan and plan['stage'] == 'egn':
+            return ('Next build: re-tones the mosaic and redoes the EGN '
+                    'statistics', '#2f6f3f')
+        changed = [k for k in set(cached.get('image') or {}) | set(wanted['image'])
+                   if (cached.get('image') or {}).get(k) != wanted['image'].get(k)]
+        why = ' (%s changed)' % ', '.join(sorted(changed)) if changed else ''
+        return 'Next build: full decode' + why, '#8a5a00'
+
+    def _refresh_build_cost(self):
+        # Never let a hint break the form it sits in.
+        try:
+            text, colour = self._build_cost()
+        except Exception:
+            text, colour = '', '#666666'
+        self.var_build_cost.set(text)
+        try:
+            self.lbl_build_cost.configure(foreground=colour)
+        except Exception:
+            pass
 
     def _refresh_installed_label(self):
         if self.current is None:

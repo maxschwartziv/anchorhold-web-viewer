@@ -224,6 +224,9 @@ class Review:
                        + np.array([p.n_err for p in pings], dtype=float)) / 100.0 * M_TO_FT
 
         self.keep = np.ones(len(pings), dtype=bool)
+        # Where a test swatch should be cut, as a fraction of the kept track.
+        # None until someone picks a spot; nothing is written if nobody does.
+        self.swatch_at = None
         # Kept apart from the rest because the rules replace themselves
         # every time they are run, and a mark made by hand must not be
         # swept away by re-running them.
@@ -398,6 +401,29 @@ class Review:
         going = self.keep & ~mask
         self.keep &= mask
         return int(going.sum())
+
+    def fraction_at(self, lon: float, lat: float) -> float:
+        """
+        How far along the kept track a position is, 0 to 1.
+
+        Which is what the swatch needs: Add Survey Locations cuts its few
+        chunks at a fraction of the survey, and a fraction of the kept pings
+        is the same measure one step earlier. Taken on the kept pings rather
+        than all of them so that throwing a transit leg away does not quietly
+        move every spot already picked.
+
+        Degrees are compared with longitude scaled by cos(latitude), so the
+        nearest ping is the nearest on the water rather than the nearest on a
+        plate carree plot, which at this latitude is a 20% error across.
+        """
+        at = np.flatnonzero(self.keep)
+        if at.size == 0:
+            return 0.5
+        scale = math.cos(math.radians(float(np.mean(self.lat[at])))) or 1.0
+        dx = (self.lon[at] - lon) * scale
+        dy = self.lat[at] - lat
+        nearest = int(np.argmin(dx * dx + dy * dy))
+        return float(nearest) / float(max(1, at.size - 1))
 
     def set_roi(self, shape) -> int:
         """Keep only what is inside the shape, and remember it as the region."""
@@ -709,6 +735,16 @@ class Review:
         any_recording.write_time_filter(table, self.time_windows(), log=log)
         report["time_filter"] = table
 
+        # Where a swatch should be cut, if one was picked. Beside the
+        # recording like everything else here, so Add Survey Locations finds
+        # it the same way it finds the filter.
+        if self.swatch_at is not None:
+            spot = os.path.join(out_root, stem + "_swatch.json")
+            with open(spot, "w") as fh:
+                json.dump({"at": round(float(self.swatch_at), 4)}, fh, indent=1)
+            report["swatch_at"] = self.swatch_at
+            log(f"  {os.path.basename(spot)}: where to cut a test swatch")
+
         csv_path = os.path.join(out_root, stem + "_soundings.csv")
         self.write_soundings(csv_path, log=log)
         report["soundings"] = csv_path
@@ -982,6 +1018,22 @@ def run_gui(path: str = ""):
             ttk.Button(picks.body, text="Clear only user selected flags",
                        command=self.on_clear_user_flags).pack(fill="x",
                                                              pady=(4, 0))
+
+            swatch = Section(side, "Test swatch", "swatch")
+            swatch.pack(fill="x", pady=(8, 0))
+            ttk.Label(swatch.body, wraplength=290, foreground="#555555",
+                      text="Add Survey Locations can rectify a few chunks to "
+                           "try the mosaic settings on. Click where you want "
+                           "that cut taken - a patch with something on it "
+                           "tells you more than open mud - and it is saved "
+                           "with the edit.").pack(fill="x", pady=(0, 4))
+            ttk.Button(swatch.body, text="Cut the swatch at the last point",
+                       command=self.on_swatch_here).pack(fill="x")
+            self.var_swatch = tk.StringVar(value="Not picked - the middle of "
+                                                 "the survey will be used.")
+            ttk.Label(swatch.body, textvariable=self.var_swatch,
+                      wraplength=290, foreground="#2f6f3f").pack(fill="x",
+                                                                 pady=(4, 0))
 
             actions = Section(side, "The whole recording", "actions")
             actions.pack(fill="x", pady=(8, 0))
@@ -1261,6 +1313,24 @@ def run_gui(path: str = ""):
                 return list(self.points)
             (x0, y0), (x1, y1) = self.points
             return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+        def on_swatch_here(self):
+            """Take the last clicked point as where a test swatch is cut."""
+            if self.review is None:
+                return
+            if not self.points:
+                self.var_status.set(
+                    "Click the map where the swatch should be cut first.")
+                return
+            lon, lat = self.points[-1]
+            at = self.review.fraction_at(lon, lat)
+            self.review.swatch_at = at
+            self.var_swatch.set(
+                "Swatch at %d%% along the kept track (%.5f, %.5f). "
+                "Saved with the next save." % (round(at * 100), lat, lon))
+            self.var_status.set(
+                "Swatch spot set. It is written beside the recording when you "
+                "save, and Add Survey Locations picks it up from there.")
 
         def on_shape(self, what: str):
             if self.review is None or len(self.points) < 2:
