@@ -32,12 +32,12 @@ RECORDING_EXTS = (".dat", ".sl2", ".sl3", ".rsd", ".svlog", ".jsf", ".xtf")
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# Survey Planner is its own project and lives outside this repo, so it is
-# looked for rather than assumed. An environment variable wins; after that,
-# the places a checkout normally sits relative to this one.
-# Survey Planner ships inside this repository. The three paths beside it are
-# where the project used to live, and are kept so an older layout, or a copy
-# someone keeps elsewhere, still resolves.
+# Survey Planner ships inside this repository. SURVEY_PLANNER still wins, for
+# anyone keeping a copy elsewhere - but it winning silently is a trap, because
+# every one of these is called run.bat and a stale override looks identical to
+# the shipped copy in the workflow list. So listing() reports the folder it
+# resolved to, and says so when that is not the one beside this file.
+# The paths after the shipped copy are where the project used to live.
 PLANNER_CANDIDATES = [
     os.environ.get("SURVEY_PLANNER", ""),
     os.path.join(ROOT, "SurveyPlanner", "run.bat"),
@@ -208,6 +208,25 @@ def status() -> dict:
     }
 
 
+def _override_note(step_id: str, launcher: str) -> str:
+    """
+    Say so when a step will start something other than the shipped copy.
+
+    Only Survey Planner can be overridden, and only by SURVEY_PLANNER. The
+    note exists because the override is invisible otherwise: the button says
+    "Open", the launcher is called run.bat either way, and a checkout left
+    over from an older layout goes on being started for months.
+    """
+    if step_id != "plan" or not launcher:
+        return ""
+    shipped = os.path.join(ROOT, "SurveyPlanner", "run.bat")
+    if os.path.normcase(os.path.abspath(launcher)) == os.path.normcase(shipped):
+        return ""
+    return ("SURVEY_PLANNER points at %s, so that copy opens rather than the "
+            "one in this repository. Clear the variable to use the shipped "
+            "one." % os.path.dirname(launcher))
+
+
 def listing() -> dict:
     """The steps, each with its launcher resolved and the disk state alongside."""
     state = status()
@@ -224,6 +243,8 @@ def listing() -> dict:
             "what": step["what"],
             "canLaunch": bool(launcher),
             "launcher": os.path.basename(launcher) if launcher else "",
+            "launcherPath": launcher,
+            "launcherNote": _override_note(step["id"], launcher),
             "missing": "" if launcher else step.get("missing", ""),
             "settings": bool(step.get("settings")),
             "folder": folder_for(step["id"]),

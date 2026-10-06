@@ -151,8 +151,31 @@ def fetch_waterbodies(lon: float, lat: float, radius_mi: float = 1.0,
     if cancel is not None and cancel.is_set():
         return []
     if not found and errors:
-        raise ShorelineError("Could not reach the NHD service. "
-                             + "; ".join(errors))
+        # NHD was retired in 2023 and is published rather than maintained, so
+        # "down" is a normal condition rather than an incident. Both layers
+        # timed out at 45 seconds the day this fallback was written, which is
+        # a planner that cannot start at all.
+        #
+        # OpenStreetMap is the second-best answer and a usable one: seconds
+        # rather than tens of seconds, the whole world rather than the United
+        # States, and outlines drawn by whoever drew them - which is fine for
+        # water you are about to look at on satellite imagery anyway. Checked
+        # against a known figure: Bull Shoals Lake came back at 47,809 acres
+        # against about 45,000 at normal pool.
+        from . import osmwater
+        try:
+            found = osmwater.fetch(lon, lat, radius_mi=radius_mi, cancel=cancel)
+        except osmwater.OsmWaterError as exc:
+            raise ShorelineError(
+                "Could not reach the NHD service, and OpenStreetMap did not "
+                "answer either.\n  NHD: " + "; ".join(errors)
+                + "\n  OSM: " + str(exc))
+        if cancel is not None and cancel.is_set():
+            return []
+        if not found:
+            raise ShorelineError(
+                "The NHD service did not answer and OpenStreetMap has no "
+                "water mapped there.\n  NHD: " + "; ".join(errors))
 
     for body in found:
         body["distance_ft"] = _distance_ft(body["rings"], lon, lat)
