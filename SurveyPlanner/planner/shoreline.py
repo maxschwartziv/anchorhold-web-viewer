@@ -26,6 +26,7 @@ import json
 import math
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -342,6 +343,73 @@ def body_key(body: dict) -> str:
     digest = hashlib.md5(seed.encode("utf-8")).hexdigest()[:10]
     safe = "".join(c if c.isalnum() else "_" for c in body.get("name", "water"))[:40]
     return f"{safe}_{digest}"
+
+
+def water_store() -> str:
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    path = os.path.join(base, "SurveyPlanner", "water")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def remember(body: dict) -> str:
+    """
+    Keep this outline, so the next look at the same water needs no network.
+
+    Beside the access points and the no-go areas rather than in the plan,
+    for the same reason: the shape of the lake belongs to the lake. Written
+    every time one is loaded, from a file or a fetch, and silently - a store
+    that cannot be written is a lost convenience, not a lost survey.
+    """
+    try:
+        path = os.path.join(water_store(), body_key(body) + ".json")
+        keep = {k: v for k, v in body.items() if k != "access"}
+        keep["remembered"] = time.time()
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(keep, fh)
+        return path
+    except (OSError, ValueError, KeyError):
+        return ""
+
+
+def remembered_containing(lon: float, lat: float):
+    """
+    An outline already on disk that holds this point, or None.
+
+    Containment, not nearness: this answers "which water is this mark in",
+    where the mark came off a sonar chart and is therefore in some water
+    already. Nearness would be a guess, and a guess here silently plans the
+    wrong lake. Islands count - a point inside one is not in the water.
+
+    The largest match wins, since a cove saved separately sits inside the
+    reservoir that also matches, and the reservoir is the survey.
+    """
+    from shapely.geometry import Point, Polygon
+
+    here = Point(lon, lat)
+    best, best_area = None, -1.0
+    try:
+        names = os.listdir(water_store())
+    except OSError:
+        return None
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(water_store(), name), encoding="utf-8") as fh:
+                body = json.load(fh)
+            rings = [[(float(p[0]), float(p[1])) for p in ring]
+                     for ring in body["rings"]]
+            shape = Polygon(rings[0], rings[1:])
+            if not shape.is_valid:
+                shape = shape.buffer(0)
+        except (OSError, ValueError, KeyError, TypeError, IndexError):
+            continue                       # a bad file is not worth a crash
+        if shape.contains(here) and shape.area > best_area:
+            body["rings"], body["distance_ft"] = rings, 0.0
+            body.setdefault("kind", "lake")
+            best, best_area = body, shape.area
+    return best
 
 
 def access_store() -> str:
