@@ -1242,7 +1242,7 @@
       toast('Tap the chart to place the region corners');
     }
     $('roiCount').textContent = roiVerts.length
-      ? roiVerts.length + ' point(s)' : 'none';
+      ? roiVerts.length + ' corner(s)' : 'no region';
   }
 
   function clearRoi() {
@@ -1251,7 +1251,7 @@
     Prefs.roi = [];
     ChartMap.clearRoi();
     $('btnDrawRoi').textContent = 'DRAW REGION';
-    $('roiCount').textContent = 'none';
+    $('roiCount').textContent = 'no region';
   }
 
   function restoreRoi() {
@@ -1259,7 +1259,7 @@
     roiVerts = saved.slice();
     if (roiVerts.length >= 3) ChartMap.setRoi(roiVerts, { closed: true });
     $('roiCount').textContent = roiVerts.length
-      ? roiVerts.length + ' point(s)' : 'none';
+      ? roiVerts.length + ' corner(s)' : 'no region';
   }
 
   /**
@@ -1792,7 +1792,7 @@
       if (roiDrawMode) {
         roiVerts.push([e.lngLat.lng, e.lngLat.lat]);
         ChartMap.setRoi(roiVerts, { closed: false, showVerts: true });
-        $('roiCount').textContent = roiVerts.length + ' point(s)';
+        $('roiCount').textContent = roiVerts.length + ' corner(s)';
         return;
       }
       if (drawMode) {
