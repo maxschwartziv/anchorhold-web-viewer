@@ -92,6 +92,7 @@ const ChartMap = (() => {
       });
     }
     ['locations-source', 'contours-source', 'shallow-source', 'geofence-source',
+     'roi-source', 'roi-verts',
       'geofence-verts', 'gps-dot-source', 'gps-track-source', 'waypoints-source',
       'preview-area-source', 'preview-track-source', 'detections-source',
       'downscan-track-source', 'downscan-cursor-source',
@@ -181,6 +182,27 @@ const ChartMap = (() => {
         'text-size': 11, 'symbol-spacing': 220,
       },
       paint: { 'text-color': '#FFFFFF', 'text-halo-color': '#000000', 'text-halo-width': 2 },
+    });
+
+    // The region of interest, for handing a patch of water to Survey
+    // Planner. Amber because it is a planning mark rather than anything the
+    // boat reacts to - the fence is green and alarms, this does not.
+    map.addLayer({
+      id: 'roi-fill', type: 'fill', source: 'roi-source',
+      paint: { 'fill-color': '#ffd24d', 'fill-opacity': 0.12 },
+    });
+    map.addLayer({
+      id: 'roi-line', type: 'line', source: 'roi-source',
+      paint: { 'line-color': '#ffd24d', 'line-width': 2, 'line-dasharray': [2, 1.5] },
+    });
+    map.addLayer({
+      id: 'roi-verts-layer', type: 'circle', source: 'roi-verts',
+      paint: {
+        'circle-radius': 5,
+        'circle-color': '#ffd24d',
+        'circle-stroke-width': 1.5,
+        'circle-stroke-color': '#1a1a1a',
+      },
     });
 
     // Anchor-watch fence, under the boat. Recoloured on breach.
@@ -277,12 +299,14 @@ const ChartMap = (() => {
       'downscan-swath', 'downscan-track', 'downscan-measure', 'downscan-cursor',
       'geofence-fill', 'geofence-line', 'geofence-verts',
       'gps-track-layer', 'gps-dot-layer', 'waypoints-layer', 'waypoint-labels',
+      'roi-fill', 'roi-line', 'roi-verts-layer',
       'preview-area-fill', 'preview-area-line', 'preview-track-line',
       'location-pins', 'location-labels',
     ];
     layerIds.forEach(id => { if (map.getLayer(id)) map.removeLayer(id); });
     [...RASTERS.map(n => `${n}-source`), 'locations-source', 'contours-source',
       'shallow-source', 'detections-source', 'geofence-source',
+      'roi-source', 'roi-verts',
       'downscan-track-source', 'downscan-cursor-source',
       'downscan-swath-source', 'downscan-measure-source',
       'geofence-verts', 'gps-dot-source',
@@ -515,6 +539,38 @@ const ChartMap = (() => {
         features: [{ type: 'Feature', properties: {}, geometry: { type: 'Polygon', coordinates: [ring] } }],
       });
       setData('geofence-verts', EMPTY);
+    },
+
+    /**
+     * Draw the region of interest.
+     *
+     * While it is being drawn it is an open line with its corners showing, so
+     * you can see what you have placed; once closed it is a filled polygon.
+     * Two points are a line and not a region, which is why the fill waits for
+     * three - the same rule the fence uses, for the same reason.
+     */
+    setRoi(points, { closed = false, showVerts = false } = {}) {
+      setData('roi-verts', showVerts && points.length ? {
+        type: 'FeatureCollection',
+        features: [{
+          type: 'Feature', properties: {},
+          geometry: { type: 'MultiPoint', coordinates: points },
+        }],
+      } : EMPTY);
+
+      if (points.length < 2) { setData('roi-source', EMPTY); return; }
+      const geometry = closed && points.length >= 3
+        ? { type: 'Polygon', coordinates: [[...points, points[0]]] }
+        : { type: 'LineString', coordinates: points };
+      setData('roi-source', {
+        type: 'FeatureCollection',
+        features: [{ type: 'Feature', properties: {}, geometry }],
+      });
+    },
+
+    clearRoi() {
+      setData('roi-source', EMPTY);
+      setData('roi-verts', EMPTY);
     },
 
     clearFenceRender() {
