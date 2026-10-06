@@ -757,6 +757,14 @@ class SurveyPlannerApp(tk.Tk):
             return                       # cancelled; the failure is moot
         self._done()
         self._say("Fetch failed.")
+        if self.overfly and self.body is None:
+            # Nothing handed over is lost by a map service being down. Say
+            # so, because an empty map after a handover reads like the
+            # handover failed, and the way out is a file rather than a retry.
+            message += ("\n\nThe " + str(len(self.overfly)) + " point(s) sent"
+                        " from the chart are still held, with the region and"
+                        " depth grid if those came too. Open a saved shoreline"
+                        " (section 1) and they go on with it.")
         messagebox.showerror("Survey Planner", message)
 
     def _fetch_done(self, bodies, stop=None):
@@ -860,6 +868,9 @@ class SurveyPlannerApp(tk.Tk):
 
     def _use_body(self, body):
         self.body = body
+        # Keep the outline, so the next handover from the chart opens on this
+        # water immediately instead of waiting on a map service.
+        shoreline.remember(body)
         self.frame = LocalFrame.centred_on(body["rings"][0])
         self.poly = shoreline.to_polygon(body, self.frame)
         self.days, self.selected = [], None
@@ -1023,6 +1034,14 @@ class SurveyPlannerApp(tk.Tk):
         self._remember_access()
         self._draw()
 
+    @staticmethod
+    def _centre(ring):
+        """The middle of a handed-over region, when there are no marks."""
+        if not ring:
+            return None
+        return (sum(p[0] for p in ring) / len(ring),
+                sum(p[1] for p in ring) / len(ring))
+
     def _take_handoff(self):
         """
         Fill in what the chart sent: objects and waypoints to drive over, and
@@ -1038,7 +1057,7 @@ class SurveyPlannerApp(tk.Tk):
         if not payload:
             return
 
-        added = 0
+        added, marks = 0, []
         for item in payload.get("objects") or []:
             try:
                 lon, lat = float(item["lon"]), float(item["lat"])
@@ -1046,6 +1065,7 @@ class SurveyPlannerApp(tk.Tk):
                 continue
             label = str(item.get("name") or item.get("cls") or "object")[:28]
             self._add_overfly(lon, lat, label)
+            marks.append((lon, lat))
             added += 1
         for row in payload.get("waypoints") or []:
             if not isinstance(row, (list, tuple)) or len(row) < 2:
@@ -1056,6 +1076,7 @@ class SurveyPlannerApp(tk.Tk):
                 continue
             label = str(row[2])[:28] if len(row) > 2 and row[2] else "waypoint"
             self._add_overfly(lon, lat, label)
+            marks.append((lon, lat))
             added += 1
 
         # The chart's soundings, to be turned into shallow no-go once there
@@ -1080,10 +1101,29 @@ class SurveyPlannerApp(tk.Tk):
             bits.append(f"a {len(self.pending_roi)}-corner region")
         if self.pending_depth:
             bits.append("the chart's depth grid")
-        if bits:
+        if not bits:
+            return
+        self._say(f"From {chart}: " + " and ".join(bits) + ".")
+        self._draw()
+
+        # Everything that just arrived knows where it is, so there is no
+        # reason to open on an empty map and ask for a pin. The first mark
+        # is the pin: it is in the water by construction - a detector found
+        # it in sonar, or it was dropped on the chart - which is a better
+        # question to put to the map service than the middle of a region
+        # whose corners may well sit on the bank.
+        pin = marks[0] if marks else self._centre(self.pending_roi)
+        if pin and self.body is None and not self.candidates:
+            known = shoreline.remembered_containing(*pin)
+            if known is not None:
+                self.pin_var.set("%.5f, %.5f" % (pin[1], pin[0]))
+                return self._use_body(known)
+            self.pin_var.set("%.5f, %.5f" % (pin[1], pin[0]))
             self._say(f"From {chart}: " + " and ".join(bits)
-                      + ". Load the water and they are waiting.")
-            self._draw()
+                      + ". Finding the water around them\u2026")
+            # After the first draw, so the marks are on screen before the
+            # search window covers them.
+            self.after(50, self.on_fetch)
 
     def _apply_pending_depth(self):
         """
