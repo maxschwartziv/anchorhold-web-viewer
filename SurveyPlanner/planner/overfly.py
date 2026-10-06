@@ -35,6 +35,12 @@ DOWN_CONE_DEG = 45.0
 # genuinely is that narrow.
 DEFAULT_TOLERANCE_FT = 8.0
 
+# How far either side of the mark each pass runs. The point is not the length
+# of line but the state of the boat over the mark: it has to be straight and
+# settled before it gets there, and the sonar needs sea floor either side of
+# the object to read it against. 150 ft is about 30 seconds at survey speed.
+DEFAULT_RUN_FT = 150.0
+
 
 def beam_half_width_ft(depth_ft: float, cone_deg: float = DOWN_CONE_DEG) -> float:
     """
@@ -96,55 +102,100 @@ def line_through(point, bearing_deg: float, region, min_line_ft: float = 0.0):
     return best
 
 
-def add_lines(lines, points, bearing_deg: float, region,
-              tolerance_ft: float = DEFAULT_TOLERANCE_FT,
-              min_line_ft: float = 0.0, log=None):
+def crossing_lines(points, bearing_deg: float, region,
+                   run_ft: float = DEFAULT_RUN_FT, log=None):
     """
-    Extend `lines` with one line per marked point that nothing already covers.
+    Two passes over every marked point, at right angles to each other.
 
-    Returns (lines, report) where report is one entry per point:
-    {point, status, line} and status is one of
+    Twice, and crossed, because one pass is one look. Down imaging sees a
+    strip a few feet wide and side scan throws its shadow one way; crossing
+    the same object on the survey bearing and again across it gives two
+    aspects and two shadow directions, which is the difference between
+    knowing something is there and knowing what it is.
 
-        'already'    a survey line runs within tolerance; nothing added
-        'added'      a line was laid through it
-        'unreachable' the point is not in navigable water
+    Each pass runs `run_ft` either side of the mark so the boat is straight
+    and settled over it, and clipped to navigable water - a pass that would
+    run onto the bank is shortened, not moved, because the mark is the point
+    and the mark must stay under the track.
 
-    Points are handled in order and each added line counts for the ones after
-    it, so two marks a few feet apart share a line rather than getting one
-    each.
+    Returns (lines, report). Report is one entry per point:
+    {point, status, lines} with status
+
+        'crossed'     two passes laid
+        'one pass'    only one direction fitted in the water available
+        'unreachable' the mark is not in navigable water at all
     """
-    out = list(lines)
-    report = []
+    from shapely.geometry import Point
+
+    out, report = [], []
     for point in points:
-        if covered(point, out, tolerance_ft):
-            report.append({"point": point, "status": "already", "line": None})
-            continue
-        geom = line_through(point, bearing_deg, region, min_line_ft)
-        if geom is None:
-            report.append({"point": point, "status": "unreachable", "line": None})
+        here = Point(point[0], point[1])
+        if not region.contains(here):
+            report.append({"point": point, "status": "unreachable", "lines": []})
             if log:
-                log(f"      overfly point at {point[0]:.0f}, {point[1]:.0f} ft is "
-                    "not in navigable water - no line laid")
+                log("      a mark at %.0f, %.0f ft is not in navigable water"
+                    % (point[0], point[1]))
             continue
-        line = {"kind": "overfly", "bearing": bearing_deg, "geom": geom}
-        out.append(line)
-        report.append({"point": point, "status": "added", "line": line})
+        made = []
+        for heading in (bearing_deg, bearing_deg + 90.0):
+            geom = _run_through(point, heading, region, run_ft)
+            if geom is not None:
+                made.append({"kind": "overfly", "bearing": heading % 180.0,
+                             "geom": geom})
+        out += made
+        report.append({"point": point,
+                       "status": "crossed" if len(made) == 2 else
+                                 ("one pass" if made else "unreachable"),
+                       "lines": made})
     return out, report
+
+
+def _run_through(point, bearing_deg: float, region, run_ft: float):
+    """
+    One straight pass over the point, `run_ft` either side, clipped to water.
+
+    The clipped piece has to still contain the mark. A sweep across a lake
+    with arms comes back in several bits and only the one holding the mark is
+    the pass that drives over it; the others are somewhere else entirely.
+    """
+    from shapely.geometry import LineString, MultiPolygon, Point
+
+    theta = math.radians(bearing_deg)
+    along = (math.sin(theta), math.cos(theta))
+    here = Point(point[0], point[1])
+    sweep = LineString([
+        (point[0] - along[0] * run_ft, point[1] - along[1] * run_ft),
+        (point[0] + along[0] * run_ft, point[1] + along[1] * run_ft),
+    ])
+    parts = region.geoms if isinstance(region, MultiPolygon) else [region]
+    best = None
+    for part in parts:
+        clipped = sweep.intersection(part)
+        pieces = (list(clipped.geoms) if clipped.geom_type == "MultiLineString"
+                  else ([clipped] if not clipped.is_empty else []))
+        for piece in pieces:
+            if piece.length < 1.0 or piece.distance(here) > 1.0:
+                continue
+            if best is None or piece.length > best.length:
+                best = piece
+    return best
 
 
 def summarise(report) -> str:
     """One line about what the marks cost, for the plan summary."""
-    added = sum(1 for r in report if r["status"] == "added")
-    already = sum(1 for r in report if r["status"] == "already")
+    crossed = sum(1 for r in report if r["status"] == "crossed")
+    single = sum(1 for r in report if r["status"] == "one pass")
     lost = sum(1 for r in report if r["status"] == "unreachable")
-    extra_ft = sum(r["line"]["geom"].length for r in report if r["line"])
+    extra_ft = sum(line["geom"].length for r in report for line in r["lines"])
     bits = []
-    if added:
-        bits.append(f"{added} line(s) added, {extra_ft / 5280.0:.2f} miles")
-    if already:
-        bits.append(f"{already} already on a line")
+    if crossed:
+        bits.append(f"{crossed} crossed twice")
+    if single:
+        bits.append(f"{single} with room for one pass only")
     if lost:
         bits.append(f"{lost} not in navigable water")
+    if extra_ft:
+        bits.append(f"{extra_ft / 5280.0:.2f} miles of run-in")
     return "; ".join(bits) if bits else "none"
 
 

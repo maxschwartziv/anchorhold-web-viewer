@@ -76,6 +76,10 @@ class PlanSettings:
         # 2 * depth * tan(22.5 deg), so the default is the strip at about
         # 19 ft of water - conservative deeper, honest in the shallows.
         self.overfly_tolerance_ft = kw.get("overfly_tolerance_ft", 8.0)
+        # How far either side of a mark each pass runs, so the boat is
+        # straight and settled over it and there is sea floor either side
+        # to read the object against.
+        self.overfly_run_ft = kw.get("overfly_run_ft", 150.0)
         # Filled in by build_lines: what each marked point cost.
         self.overfly_report = []
         # A first transect that follows the shore, as close in as the
@@ -490,15 +494,11 @@ def build_lines(poly, settings: PlanSettings, roi=None):
         lines += [{"kind": "orthogonal", "bearing": cross, "geom": g}
                   for g in grid_lines(region, cross, settings.orthogonal_spacing_ft,
                                       settings.min_line_ft)]
-    # Marked points last, so a point the grid already crosses costs nothing.
-    # min_line_ft is deliberately not applied: a short line through a marked
-    # object is the whole reason it was marked, and dropping it for being
-    # short would silently undo the instruction.
-    if settings.overfly:
-        lines, report = overfly.add_lines(
-            lines, settings.overfly, bearing, region,
-            tolerance_ft=settings.overfly_tolerance_ft, min_line_ft=0.0)
-        settings.overfly_report = report
+    # Marked points are NOT added here. They were, and it was wrong: this
+    # function is only reached when square_blocks and line-of-sight are both
+    # off, so with the defaults the marks were never driven over at all and
+    # nothing said so. They are laid in build_plan instead, which every path
+    # goes through - see overfly_pass.
     return lines, bearing
 
 
@@ -1057,6 +1057,28 @@ def _pick_orientations(runs, start_xy, shore=None, shore_weight: float = 0.0):
     return [options[i][picked[i]] for i in range(len(options))]
 
 
+def overfly_pass(settings: PlanSettings, region, bearing_deg_: float, log=None):
+    """
+    The crossing passes over every marked point, to run before the survey.
+
+    Before, because the marks are why the trip is worth making: a detector
+    found something and the question is what it is. Running them first means
+    the answer is in hand whether or not the rest of the day survives the
+    weather, and it means the boat is over them while the water is as it was
+    when the plan was drawn.
+    """
+    if not settings.overfly:
+        settings.overfly_report = []
+        return []
+    lines, report = overfly.crossing_lines(
+        settings.overfly, bearing_deg_, region,
+        run_ft=settings.overfly_run_ft, log=log)
+    settings.overfly_report = report
+    if log:
+        log("marked points: " + overfly.summarise(report))
+    return lines
+
+
 def build_plan(poly, settings: PlanSettings, roi=None, access_points=None,
                frame=None, log=print):
     """
@@ -1107,6 +1129,10 @@ def build_plan(poly, settings: PlanSettings, roi=None, access_points=None,
 
     if not settings.square_blocks and not settings.require_line_of_sight:
         lines, _ = build_lines(poly, settings, roi)
+        # Held back rather than mixed in: ordering nearest-first would
+        # scatter them through the day, and the whole point is that they
+        # are done before the survey rather than during it.
+        crosses = overfly_pass(settings, region, bearing, log)
         start = None
         if access_points and frame is not None:
             start = frame.to_ft(*access_points[0]["lonlat"])
@@ -1148,7 +1174,8 @@ def build_plan(poly, settings: PlanSettings, roi=None, access_points=None,
         # a day dedicated to the transect rather than the transect worked
         # into the day the boat is already down that end of the lake.
         ordered = _order_with_hops(
-            order_nearest_first(shore_legs + lines, start),
+            order_nearest_first(crosses, start)
+            + order_nearest_first(shore_legs + lines, start),
             grid_raster, grid_mask)
         return split_into_days(ordered, settings), info
 
@@ -1285,6 +1312,14 @@ def build_plan(poly, settings: PlanSettings, roi=None, access_points=None,
 
     pending = [_group_lines(g) for g in groups]
     pending = [p for p in pending if p]
+
+    # The crossing passes go at the front of the queue, as their own run, so
+    # the first day starts by driving over the marks. Their own run and not
+    # merged into the first block's: a block is a patch of water worked as a
+    # unit, and these are errands scattered across the lake.
+    crosses = overfly_pass(settings, region, bearing, log)
+    if crosses:
+        pending.insert(0, crosses)
 
     if settings.shore_pass:
         shore_legs = [l for run in pending for l in run

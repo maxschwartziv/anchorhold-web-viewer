@@ -309,8 +309,10 @@ class SurveyPlannerApp(tk.Tk):
         ttk.Label(over, wraplength=300, foreground="#555555",
                   text="Side scan is blind under the boat and down imaging "
                        "sees only that strip, so anything you want on the "
-                       "down beam has to be driven over. Each mark gets its "
-                       "own line through it.").pack(anchor="w", pady=(0, 4))
+                       "down beam has to be driven over. Each mark is crossed "
+                       "twice, at right angles, before the rest of the "
+                       "survey - one pass is one look, from one side, with "
+                       "the shadow falling one way.").pack(anchor="w", pady=(0, 4))
         ttk.Checkbutton(over, text="Click the map to mark a point"
                                " (right-click undoes)",
                         variable=self._picking_overfly,
@@ -325,15 +327,17 @@ class SurveyPlannerApp(tk.Tk):
         ttk.Button(ob, text="Clear",
                    command=self.on_clear_overfly).pack(side="left")
         otol = ttk.Frame(over); otol.pack(fill="x")
-        ttk.Label(otol, text="Counts as over within").pack(side="left")
-        self.vars["overfly_tolerance_ft"] = tk.StringVar(value="8")
-        ttk.Entry(otol, textvariable=self.vars["overfly_tolerance_ft"],
+        ttk.Label(otol, text="Run either side of the mark").pack(side="left")
+        self.vars["overfly_run_ft"] = tk.StringVar(value="150")
+        ttk.Entry(otol, textvariable=self.vars["overfly_run_ft"],
                   width=6).pack(side="left", padx=4)
         ttk.Label(otol, text="ft").pack(side="left")
         ttk.Label(over, wraplength=300, foreground="#555555",
-                  text="The down beam's strip is about 2 x depth x tan(22.5 deg) "
-                       "wide: 4 ft either side in 10 ft of water, 8 ft in 20 ft. "
-                       "A mark the grid already crosses costs nothing.").pack(
+                  text="Long enough that the boat is straight and settled over "
+                       "the mark, with sea floor either side to read the object "
+                       "against. 150 ft is about 30 seconds at survey speed. A "
+                       "pass that would run onto the bank is shortened, never "
+                       "moved - the mark has to stay under the track.").pack(
             anchor="w", pady=(2, 0))
 
         no_go = self._section(left, "5. No-go areas")
@@ -1796,7 +1800,7 @@ class SurveyPlannerApp(tk.Tk):
             coverage_pct=number("coverage_pct", 100.0),
             overfly=[self.frame.to_ft(*p["lonlat"]) for p in self.overfly]
                     if self.frame is not None else [],
-            overfly_tolerance_ft=number("overfly_tolerance_ft", 8.0),
+            overfly_run_ft=number("overfly_run_ft", 150.0),
             no_go=[z["geom"] for z in self.no_go],
             no_go_margin_ft=number("no_go_margin_ft", 25.0),
             shore_pass=self.shore_var.get(),
