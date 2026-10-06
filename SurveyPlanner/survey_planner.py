@@ -79,6 +79,27 @@ DAY_COLOURS = ["#00e5a0", "#ffc400", "#ff6969", "#78c8ff", "#d782ff",
                "#96ff78", "#ff9632", "#50dcdc", "#ff5faf", "#b9b9ff"]
 
 
+def _outputs_dir() -> str:
+    """
+    Where to open the file picker, if the pipeline has told anyone.
+
+    Detections and waypoints live under AnchorHold's output directory, which
+    this program has no business knowing about: the planner is its own thing
+    and does not import the pipeline. So the location is read out of the
+    settings file the pipeline writes, and every failure - no file, bad JSON,
+    folder since deleted - comes back as the empty string, which is what
+    filedialog takes to mean "wherever you were last".
+    """
+    try:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        with open(os.path.join(base, "AnchorHold", "workspace.json"),
+                  encoding="utf-8") as fh:
+            folder = json.load(fh).get("outputDir") or ""
+        return folder if folder and os.path.isdir(folder) else ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
 class SurveyPlannerApp(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1017,7 +1038,7 @@ class SurveyPlannerApp(tk.Tk):
             title="Points to drive over",
             filetypes=[("Detections or waypoints", "*.geojson *.json"),
                        ("All files", "*.*")],
-            initialdir=workspace.output_dir())
+            initialdir=_outputs_dir())
         if not path:
             return
         try:
