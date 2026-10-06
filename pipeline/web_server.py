@@ -22,6 +22,8 @@ Routes:
     /tiles/<loc>/index.json        every tile of that chart, for offline saving
     /data/<loc>/<name>             grid, contour or legend file for that chart
     /charts/<loc>/detections       take in a detector's findings (POST)
+    /tools/plan/handoff            send this chart's marks to Survey Planner
+                                   and open it (POST, this PC)
     /tools.json                    the workflow checklist and where it stands
     /tools/<step>/launch           start that step's program (POST, this PC)
     /tools/<step>/folder           show that step's folder (POST, this PC)
@@ -277,6 +279,8 @@ class Handler(BaseHTTPRequestHandler):
                     path[len("/charts/"):-len("/detections/clear")])
             if path.startswith("/charts/") and path.endswith("/remove"):
                 return self.remove_chart(path[len("/charts/"):-len("/remove")])
+            if path == "/tools/plan/handoff":
+                return self.plan_handoff()
             if path.startswith("/tools/") and path.endswith("/launch"):
                 return self.launch_tool(path[len("/tools/"):-len("/launch")])
             if path == "/tools/recordings":
@@ -689,6 +693,51 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(
                 {"ok": False, "error": f"Could not remove them: {exc}"}, status=500)
         return self.send_json({"ok": True, "id": loc_id, "had": had})
+
+    def plan_handoff(self):
+        """
+        Take the chart's objects, waypoints and region, then open the planner.
+
+        Same rule as launching any step: the planner runs on the machine
+        holding the charts, so a browser on the boat's wifi is refused rather
+        than given a button that would start a program on someone else's
+        computer.
+        """
+        if not self.from_this_machine():
+            return self.send_json(
+                {"ok": False,
+                 "error": "Survey Planner opens on the computer serving these "
+                          "charts, not from here."}, status=403)
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > 20_000_000:
+            return self.send_json({"ok": False, "error": "Nothing was sent."},
+                                  status=400)
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            return self.send_json({"ok": False, "error": f"Not readable JSON: {exc}"},
+                                  status=400)
+        try:
+            written = tools.write_handoff(payload)
+        except ValueError as exc:
+            return self.send_json({"ok": False, "error": str(exc)}, status=400)
+        except OSError as exc:
+            return self.send_json({"ok": False, "error": f"Could not write it: {exc}"},
+                                  status=500)
+        # launch() says it failed by raising, the same as every other step -
+        # a returned dict is a start, not a status. Checking for an "ok" key
+        # that was never there reported every successful launch as a failure.
+        try:
+            started = tools.launch("plan")
+        except (ValueError, OSError) as exc:
+            return self.send_json(
+                {"ok": False,
+                 "error": f"{exc} The marks were saved, so opening Survey "
+                          "Planner by hand picks them up."},
+                status=500)
+        if not QUIET:
+            print(f"  handed {os.path.basename(written)} to Survey Planner")
+        return self.send_json({"ok": True, "written": written, **started})
 
     def set_default(self, loc_id: str):
         """Choose the chart the app opens on."""

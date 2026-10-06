@@ -17,7 +17,9 @@ actually got to rather than only what could be run.
 
 from __future__ import annotations
 
+import json
 import os
+import time
 import subprocess
 import sys
 
@@ -206,6 +208,88 @@ def status() -> dict:
         "charts": [i for i in installed if i],
         "defaultChart": catalog.get("defaultLocationId"),
     }
+
+
+HANDOFF_NAME = "from_chart.json"
+
+
+def handoff_path() -> str:
+    """
+    Where the chart leaves marks for Survey Planner to pick up.
+
+    Beside the planner's own settings rather than in either program's folder,
+    because it belongs to neither: the viewer writes it, the planner reads it
+    once and renames it away. %LOCALAPPDATA% is also the one place both can
+    agree on without either importing the other.
+    """
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "SurveyPlanner", HANDOFF_NAME)
+
+
+def write_handoff(payload: dict) -> str:
+    """
+    Keep what the chart sent, for the planner to find when it opens.
+
+    Validated here rather than trusted: it arrives over HTTP, and the planner
+    will put these straight on a map. Anything off the globe is dropped, and
+    a region of fewer than three corners is not a region.
+    """
+    def point(lon, lat):
+        lon, lat = float(lon), float(lat)
+        if not (-180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0):
+            raise ValueError("off the globe")
+        return [lon, lat]
+
+    objects = []
+    for item in (payload.get("objects") or [])[:20000]:
+        try:
+            lon, lat = point(item.get("lon"), item.get("lat"))
+        except (TypeError, ValueError):
+            continue
+        objects.append({
+            "lon": lon, "lat": lat,
+            "name": str(item.get("name", ""))[:40],
+            "cls": str(item.get("cls", "Object"))[:60],
+            "confidence": str(item.get("confidence", ""))[:12],
+        })
+
+    waypoints = []
+    for row in (payload.get("waypoints") or [])[:5000]:
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            continue
+        try:                                   # waypoints are lat, lon
+            lon, lat = point(row[1], row[0])
+        except (TypeError, ValueError):
+            continue
+        label = str(row[2])[:40] if len(row) > 2 and row[2] is not None else ""
+        waypoints.append([lat, lon, label])
+
+    roi = []
+    for pair in (payload.get("roi") or [])[:2000]:
+        if not isinstance(pair, (list, tuple)) or len(pair) < 2:
+            continue
+        try:
+            roi.append(point(pair[0], pair[1]))
+        except (TypeError, ValueError):
+            continue
+    if len(roi) < 3:
+        roi = []
+
+    if not objects and not waypoints and not roi:
+        raise ValueError("Nothing usable in that - no objects, waypoints or region.")
+
+    path = handoff_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({
+            "chart": str(payload.get("chart", ""))[:120],
+            "name": str(payload.get("name", ""))[:120],
+            "objects": objects,
+            "waypoints": waypoints,
+            "roi": roi,
+            "written": time.time(),
+        }, fh, indent=1)
+    return path
 
 
 def _override_note(step_id: str, launcher: str) -> str:

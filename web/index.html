@@ -234,6 +234,19 @@
   <label class="field checkbox"><input id="setEscalate" type="checkbox"> Escalate alarm volume</label>
   <label class="field checkbox"><input id="setCenterGps" type="checkbox"> Start centered on GPS</label>
   <label class="field checkbox"><input id="setKeepAwake" type="checkbox" checked> Keep the screen awake on watch</label>
+  <div class="field">
+    <div class="row">
+      <button id="btnDrawRoi" type="button">DRAW REGION</button>
+      <button id="btnClearRoi" type="button">CLEAR</button>
+      <span id="roiCount" class="muted">none</span>
+    </div>
+    <p class="hint">A patch of water to plan a survey over. Tap the chart to
+      place corners, then close it.</p>
+    <button id="btnSendPlanner" type="button">SEND TO SURVEY PLANNER</button>
+    <p class="hint">Opens Survey Planner on this computer with this chart's
+      objects, waypoints and region already filled in.</p>
+  </div>
+
   <label class="field checkbox"><input id="setShowPreviews" type="checkbox" checked> Show other surveys' outlines and tracks</label>
   <label class="field checkbox"><input id="setPreviews" type="checkbox"> ...including the one being read</label>
   <label class="field checkbox"><input id="setDevData" type="checkbox"> Show developer data</label>

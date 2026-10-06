@@ -79,6 +79,31 @@ DAY_COLOURS = ["#00e5a0", "#ffc400", "#ff6969", "#78c8ff", "#d782ff",
                "#96ff78", "#ff9632", "#50dcdc", "#ff5faf", "#b9b9ff"]
 
 
+HANDOFF = os.path.join(os.environ.get("LOCALAPPDATA")
+                       or os.path.expanduser("~"),
+                       "SurveyPlanner", "from_chart.json")
+
+
+def _read_handoff():
+    """
+    What AnchorHold Web Viewer left for this program, or None.
+
+    Read once and renamed away rather than deleted, so a handover that goes
+    wrong can be looked at - and so opening the planner again tomorrow does
+    not silently re-fill it with last week's marks.
+    """
+    try:
+        with open(HANDOFF, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    try:
+        os.replace(HANDOFF, HANDOFF + ".used")
+    except OSError:
+        pass
+    return payload if isinstance(payload, dict) else None
+
+
 def _outputs_dir() -> str:
     """
     Where to open the file picker, if the pipeline has told anyone.
@@ -139,6 +164,9 @@ class SurveyPlannerApp(tk.Tk):
         self._sharpening = False
 
         self._build_ui()
+        # Whatever the chart sent, if it sent anything. After the UI exists,
+        # because it fills in the lists it is read into.
+        self.after(200, self._take_handoff)
         self._draw()
 
     # ---- interface ---------------------------------------------------------
@@ -865,7 +893,12 @@ class SurveyPlannerApp(tk.Tk):
         big = (" This is large water - zoom in and draw a region of interest"
                " (section 3) over the part you want, or Compute will plan"
                " the whole thing." if oversize else "")
-        self._say("Shoreline loaded." + remembered + big
+        # A region handed over by the chart has been waiting for a frame to
+        # be drawn in. Now there is one.
+        handed = bool(getattr(self, "pending_roi", None))
+        self._apply_pending_roi()
+        from_chart = (" The region sent from the chart is on." if handed else "")
+        self._say("Shoreline loaded." + remembered + big + from_chart
                   + " Fetching imagery and roads…")
         self._load_basemap()
         self._refresh_tree()
@@ -981,6 +1014,80 @@ class SurveyPlannerApp(tk.Tk):
         self._say(f"{name} snapped {moved:.0f} ft onto the shoreline.")
         self._remember_access()
         self._draw()
+
+    def _take_handoff(self):
+        """
+        Fill in what the chart sent: objects and waypoints to drive over, and
+        the region to survey.
+
+        Everything arrives as points to pass over, because that is what both
+        of them are once they are here - a crab pot the detector found and a
+        waypoint dropped by hand are both somewhere to put the boat. The
+        region is kept as lon/lat until a lake is loaded, since the local
+        frame does not exist until then.
+        """
+        payload = _read_handoff()
+        if not payload:
+            return
+
+        added = 0
+        for item in payload.get("objects") or []:
+            try:
+                lon, lat = float(item["lon"]), float(item["lat"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            label = str(item.get("name") or item.get("cls") or "object")[:28]
+            self._add_overfly(lon, lat, label)
+            added += 1
+        for row in payload.get("waypoints") or []:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            try:
+                lat, lon = float(row[0]), float(row[1])
+            except (TypeError, ValueError):
+                continue
+            label = str(row[2])[:28] if len(row) > 2 and row[2] else "waypoint"
+            self._add_overfly(lon, lat, label)
+            added += 1
+
+        roi = [p for p in (payload.get("roi") or [])
+               if isinstance(p, (list, tuple)) and len(p) >= 2]
+        if len(roi) >= 3:
+            # Held until a lake is loaded; _apply_pending_roi puts it on once
+            # there is a frame to put it in.
+            self.pending_roi = [(float(p[0]), float(p[1])) for p in roi]
+        else:
+            self.pending_roi = None
+
+        chart = payload.get("name") or payload.get("chart") or "the chart"
+        bits = []
+        if added:
+            bits.append(f"{added} point(s) to drive over")
+        if self.pending_roi:
+            bits.append(f"a {len(self.pending_roi)}-corner region")
+        if bits:
+            self._say(f"From {chart}: " + " and ".join(bits)
+                      + ". Load the water and they are waiting.")
+            self._draw()
+
+    def _apply_pending_roi(self):
+        """
+        Put a handed-over region on the map, once there is a frame for it.
+
+        Called after a waterbody is loaded. Does nothing twice: the region
+        becomes the ROI like any other and the pending copy is dropped.
+        """
+        pending = getattr(self, "pending_roi", None)
+        if not pending or self.frame is None:
+            return
+        self.roi_pts = list(pending)
+        self.pending_roi = None
+        try:
+            self._close_roi()
+        except Exception:
+            # If the ROI cannot be closed - a region that misses the water,
+            # say - leave the points drawn rather than losing them.
+            self._draw()
 
     def _overfly_mode_changed(self):
         """One picking mode at a time, or a click means two things at once."""

@@ -19,6 +19,18 @@
   let tideOffset = 0;
   let targetTimeMillis = Date.now();
 
+  // The objects on this chart as they were loaded. Only the count was kept
+  // before, because only the count drove the switch - but handing them to
+  // Survey Planner needs the points themselves, and reading them back out of
+  // a map source is a worse idea than not throwing them away.
+  let detectionFc = null;
+
+  // Region of interest: the patch of water to hand to Survey Planner.
+  // Lives here rather than in Prefs while it is being drawn, and is saved
+  // once it closes - a half-drawn region is not worth surviving a reload.
+  let roiVerts = [];
+  let roiDrawMode = false;
+
   // Fence drawing state (the armed fence itself lives in AnchorWatch).
   let drawMode = false;
   let fenceVerts = [];
@@ -350,6 +362,7 @@
     // the previous survey's pots must not label this one.
     detectionCount = 0;
     loadOverlay(target, 'detections', fc => {
+      detectionFc = fc || null;
       detectionCount = fc && fc.features ? fc.features.length : 0;
       ChartMap.setDetections(fc);
       applyControlsToChart();
@@ -1201,6 +1214,100 @@
     updateAnchorInfo();
   }
 
+  /**
+   * Draw a region of interest, or close the one being drawn.
+   *
+   * The two drawing modes are mutually exclusive: a tap on the chart has to
+   * mean one thing, and the fence alarms while this does not.
+   */
+  function toggleDrawRoi() {
+    if (roiDrawMode) {
+      roiDrawMode = false;
+      $('btnDrawRoi').textContent = 'DRAW REGION';
+      if (roiVerts.length >= 3) {
+        ChartMap.setRoi(roiVerts, { closed: true });
+        Prefs.roi = roiVerts;
+        toast(roiVerts.length + '-point region set');
+      } else {
+        roiVerts = [];
+        ChartMap.clearRoi();
+        toast('A region needs at least three points');
+      }
+    } else {
+      if (drawMode) toggleDrawFence();          // one drawing mode at a time
+      roiVerts = [];
+      ChartMap.clearRoi();
+      roiDrawMode = true;
+      $('btnDrawRoi').textContent = 'CLOSE REGION';
+      toast('Tap the chart to place the region corners');
+    }
+    $('roiCount').textContent = roiVerts.length
+      ? roiVerts.length + ' point(s)' : 'none';
+  }
+
+  function clearRoi() {
+    roiDrawMode = false;
+    roiVerts = [];
+    Prefs.roi = [];
+    ChartMap.clearRoi();
+    $('btnDrawRoi').textContent = 'DRAW REGION';
+    $('roiCount').textContent = 'none';
+  }
+
+  function restoreRoi() {
+    const saved = Array.isArray(Prefs.roi) ? Prefs.roi : [];
+    roiVerts = saved.slice();
+    if (roiVerts.length >= 3) ChartMap.setRoi(roiVerts, { closed: true });
+    $('roiCount').textContent = roiVerts.length
+      ? roiVerts.length + ' point(s)' : 'none';
+  }
+
+  /**
+   * Hand this chart's marks to Survey Planner and open it.
+   *
+   * What the planner wants and what the chart holds are the same three
+   * things under different names: the objects on this chart, the waypoints
+   * dropped on it, and the region drawn on it. Sending them together is the
+   * difference between planning a survey around what was found last time and
+   * re-typing it.
+   *
+   * The server does the writing and the launching, because the planner runs
+   * on the machine holding the charts and a browser on the boat's wifi has
+   * no business starting programs on it.
+   */
+  async function exportToPlanner() {
+    const feats = (detectionFc && detectionFc.features) || [];
+    const objects = feats.map(f => {
+      const c = ((f.geometry || {}).coordinates) || [];
+      const p = f.properties || {};
+      return {
+        lon: c[0], lat: c[1],
+        name: p.tracker_id || '',
+        cls: p.class_name || 'Object',
+        confidence: p.confidence || '',
+      };
+    }).filter(o => Number.isFinite(o.lon) && Number.isFinite(o.lat));
+    const waypoints = (Prefs.waypoints || []).map(w => [w[0], w[1], w[2] || '']);
+    const body = {
+      chart: location ? location.id : '',
+      name: location ? location.name : '',
+      objects,
+      waypoints,
+      roi: roiVerts.length >= 3 ? roiVerts : [],
+    };
+    if (!objects.length && !waypoints.length && !body.roi.length) {
+      toast('Nothing to send - draw a region, drop a waypoint, or load objects');
+      return;
+    }
+    const result = await postJson('tools/plan/handoff', body);
+    if (!result.ok) {
+      toast(result.error || 'The chart server would not take that.');
+      return;
+    }
+    toast(`${objects.length} object(s), ${waypoints.length} waypoint(s)`
+          + `${body.roi.length ? ', a region' : ''} sent - Survey Planner is opening`);
+  }
+
   function clearFence() {
     drawMode = false;
     fenceVerts = [];
@@ -1658,6 +1765,9 @@
     $('setEscalate').addEventListener('change', e => { Prefs.alarmEscalate = e.target.checked; });
     $('setCenterGps').addEventListener('change', e => { Prefs.startCenterOnGps = e.target.checked; });
     $('setKeepAwake').addEventListener('change', e => { Prefs.keepAwake = e.target.checked; });
+    $('btnDrawRoi').addEventListener('click', toggleDrawRoi);
+    $('btnClearRoi').addEventListener('click', clearRoi);
+    $('btnSendPlanner').addEventListener('click', exportToPlanner);
     $('setShowPreviews').addEventListener('change', e => {
       Prefs.showPreviews = e.target.checked;
       // "Always show" only means anything when they are shown at all, so it
@@ -1679,6 +1789,12 @@
     const map = ChartMap.map;
 
     map.on('click', e => {
+      if (roiDrawMode) {
+        roiVerts.push([e.lngLat.lng, e.lngLat.lat]);
+        ChartMap.setRoi(roiVerts, { closed: false, showVerts: true });
+        $('roiCount').textContent = roiVerts.length + ' point(s)';
+        return;
+      }
       if (drawMode) {
         fenceVerts.push([e.lngLat.lng, e.lngLat.lat]);
         ChartMap.setFence(fenceVerts, { closed: false, showVerts: true });
