@@ -737,7 +737,11 @@ class Handler(BaseHTTPRequestHandler):
                 status=500)
         if not QUIET:
             print(f"  handed {os.path.basename(written)} to Survey Planner")
-        return self.send_json({"ok": True, "written": written, **started})
+        with open(written, encoding="utf-8") as fh:
+            sent = json.load(fh)
+        return self.send_json({"ok": True, "written": written,
+                               "depthGrid": bool(sent.get("depthGrid")),
+                               **started})
 
     def set_default(self, loc_id: str):
         """Choose the chart the app opens on."""

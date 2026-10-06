@@ -896,8 +896,12 @@ class SurveyPlannerApp(tk.Tk):
         # A region handed over by the chart has been waiting for a frame to
         # be drawn in. Now there is one.
         handed = bool(getattr(self, "pending_roi", None))
+        handed_depth = bool(getattr(self, "pending_depth", None))
         self._apply_pending_roi()
-        from_chart = (" The region sent from the chart is on." if handed else "")
+        self._apply_pending_depth()
+        from_chart = ((" The region sent from the chart is on." if handed else "")
+                      + (" Shallow water from the chart's grid is marked no-go."
+                         if handed_depth else ""))
         self._say("Shoreline loaded." + remembered + big + from_chart
                   + " Fetching imagery and roads…")
         self._load_basemap()
@@ -1050,6 +1054,11 @@ class SurveyPlannerApp(tk.Tk):
             self._add_overfly(lon, lat, label)
             added += 1
 
+        # The chart's soundings, to be turned into shallow no-go once there
+        # is a lake and a frame to measure them against.
+        grid = payload.get("depthGrid") or ""
+        self.pending_depth = grid if grid and os.path.isdir(grid) else None
+
         roi = [p for p in (payload.get("roi") or [])
                if isinstance(p, (list, tuple)) and len(p) >= 2]
         if len(roi) >= 3:
@@ -1065,10 +1074,30 @@ class SurveyPlannerApp(tk.Tk):
             bits.append(f"{added} point(s) to drive over")
         if self.pending_roi:
             bits.append(f"a {len(self.pending_roi)}-corner region")
+        if self.pending_depth:
+            bits.append("the chart's depth grid")
         if bits:
             self._say(f"From {chart}: " + " and ".join(bits)
                       + ". Load the water and they are waiting.")
             self._draw()
+
+    def _apply_pending_depth(self):
+        """
+        Turn the chart's soundings into shallow no-go, once there is a lake.
+
+        Deliberately after the region: _add_depth_sources measures against
+        self.poly, and a region narrows what is worth looking at. Failures
+        are reported and swallowed - a handover that cannot read a grid
+        should still leave the marks and the region on the map.
+        """
+        pending = getattr(self, "pending_depth", None)
+        if not pending or self.frame is None or self.poly is None:
+            return
+        self.pending_depth = None
+        try:
+            self._add_depth_sources([pending])
+        except Exception as exc:
+            self._say("The chart's depth grid could not be read: " + str(exc))
 
     def _apply_pending_roi(self):
         """

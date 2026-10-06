@@ -226,6 +226,27 @@ def handoff_path() -> str:
     return os.path.join(base, "SurveyPlanner", HANDOFF_NAME)
 
 
+def chart_depth_grid(chart_id: str) -> str:
+    """
+    The chart's folder, if it holds a depth grid the planner can read.
+
+    A path rather than the data. The handover is local by definition - the
+    planner runs on this machine, which is why the endpoint refuses anyone
+    else - so sending megabytes of soundings through a browser to write them
+    out again would be work for its own sake. depthgrid.load_source takes the
+    folder and reads depth_grid.json beside depth_grid.bin, which is exactly
+    how the chart library stores it.
+    """
+    if not chart_id:
+        return ""
+    try:
+        import web_charts
+        folder = web_charts.chart_dir(chart_id)
+    except Exception:
+        return ""
+    return folder if os.path.isfile(os.path.join(folder, "depth_grid.json")) else ""
+
+
 def write_handoff(payload: dict) -> str:
     """
     Keep what the chart sent, for the planner to find when it opens.
@@ -287,6 +308,9 @@ def write_handoff(payload: dict) -> str:
             "objects": objects,
             "waypoints": waypoints,
             "roi": roi,
+            # Where the soundings are, so the planner can put the shallow
+            # water on as no-go rather than being told about it.
+            "depthGrid": chart_depth_grid(str(payload.get("chart", ""))),
             "written": time.time(),
         }, fh, indent=1)
     return path
