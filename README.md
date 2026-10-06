@@ -15,6 +15,35 @@ recording and produces the georeferenced mosaic.
 **[Full user guide at droneboatfleet.com](https://www.droneboatfleet.com/anchorhold-web-viewer/)**,
 covering every stage from planning survey transects to each chart overlay.
 
+## Driving over a point on purpose
+
+Side scan is blind under the boat and down imaging sees only that strip, so
+anything you want a downward look at has to be driven over rather than past.
+Survey Planner's **Drive over these** lays a line through each marked point,
+parallel to the rest of the survey.
+
+Marks can be clicked on its map, or imported from any of these - all of which
+the pipeline already writes:
+
+```
+output/<survey>/ghostvision/<survey>_detections.geojson   what GhostVision found
+output/<survey>/detections.geojson                        the copy the build kept
+web_charts/<chart>/detections.geojson                     what the viewer shows
+output/waypoints.json                                     waypoints dropped in the viewer
+```
+
+**Import points...** reads a GeoJSON FeatureCollection of points or the
+viewer's `{"waypoints": [[lat, lon, label], ...]}`, then asks which classes and
+what confidence floor before adding any - a detector's output is a list of
+maybes, and which are worth a line of survey is a judgement about that survey.
+
+`pipeline/places_to_objects.py` turns a CSV of `name, lat, lon, depth_ft, note`
+into the same format, so a list written by hand imports the same way and can
+also be loaded into the viewer's objects layer.
+
+SurveyPlanner/README.md has the longer version, including how close counts as
+"over" and why.
+
 ## Chart Overlays
 
 - **Depth.** Bathymetry shaded by depth, with contours drawn on top at an
