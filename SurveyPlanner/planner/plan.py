@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 
+from . import overfly
 from .geometry import axis_bearing_deg, polyline_length_ft, turn_angles_deg
 
 MILES_TO_FEET = 5280.0
@@ -66,6 +67,17 @@ class PlanSettings:
         # a dock is about the things around it you cannot see - mooring
         # lines, cables, a swim ladder, a boat on the far side of it.
         self.no_go_margin_ft = kw.get("no_go_margin_ft", 25.0)
+        # Places the survey has to pass directly over, in local feet. Side
+        # scan leaves a blind strip under the boat and down imaging sees only
+        # that strip, so anything wanted on the down beam has to be driven
+        # over rather than past. Each one gets its own line (planner/overfly.py).
+        self.overfly = list(kw.get("overfly") or [])
+        # How close counts as over. The down beam's footprint is
+        # 2 * depth * tan(22.5 deg), so the default is the strip at about
+        # 19 ft of water - conservative deeper, honest in the shallows.
+        self.overfly_tolerance_ft = kw.get("overfly_tolerance_ft", 8.0)
+        # Filled in by build_lines: what each marked point cost.
+        self.overfly_report = []
         # A first transect that follows the shore, as close in as the
         # setback and the turn filter allow, before the grid starts.
         self.shore_pass = kw.get("shore_pass", False)
@@ -478,6 +490,15 @@ def build_lines(poly, settings: PlanSettings, roi=None):
         lines += [{"kind": "orthogonal", "bearing": cross, "geom": g}
                   for g in grid_lines(region, cross, settings.orthogonal_spacing_ft,
                                       settings.min_line_ft)]
+    # Marked points last, so a point the grid already crosses costs nothing.
+    # min_line_ft is deliberately not applied: a short line through a marked
+    # object is the whole reason it was marked, and dropping it for being
+    # short would silently undo the instruction.
+    if settings.overfly:
+        lines, report = overfly.add_lines(
+            lines, settings.overfly, bearing, region,
+            tolerance_ft=settings.overfly_tolerance_ft, min_line_ft=0.0)
+        settings.overfly_report = report
     return lines, bearing
 
 

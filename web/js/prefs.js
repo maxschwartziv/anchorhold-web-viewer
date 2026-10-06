@@ -32,7 +32,7 @@ const Prefs = (() => {
 
     nightMode: false, keyVisible: true, hudVisible: true,
     // Outlines and tracks of the other surveys; devData is the diagnostics overlay.
-    alwaysShowPreviews: false, devData: false,
+    showPreviews: true, alwaysShowPreviews: false, devData: false,
 
     // Feet: these are US lake surveys, and the depth finder, the paper
     // charts and the boat's own readout are all imperial.

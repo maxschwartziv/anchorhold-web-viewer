@@ -105,6 +105,11 @@ class SurveyPlannerApp(tk.Tk):
         self.no_go = []             # [{name, kind, geom}] in local feet
         self.depth_grids = []       # AnchorHold depth grids loaded for this lake
         self.no_go_pts = []         # corners of the one being drawn
+        # Places the survey must pass directly over, for the down beam.
+        # [{lonlat, name}] - lon/lat like access points, so a plan survives
+        # being reloaded against a different local frame.
+        self.overfly = []
+        self._picking_overfly = tk.BooleanVar(value=False)
         self._drawing_no_go = tk.BooleanVar(value=False)
         self._view = None           # held xlim/ylim once the map has been moved
         self._drag_from = None      # where a middle-button pan started
@@ -251,7 +256,38 @@ class SurveyPlannerApp(tk.Tk):
         self.roi_label = ttk.Label(roi, text="whole lake", foreground="#666")
         self.roi_label.pack(side="left", padx=6)
 
-        no_go = self._section(left, "4. No-go areas")
+        over = self._section(left, "4. Drive over these")
+        ttk.Label(over, wraplength=300, foreground="#555555",
+                  text="Side scan is blind under the boat and down imaging "
+                       "sees only that strip, so anything you want on the "
+                       "down beam has to be driven over. Each mark gets its "
+                       "own line through it.").pack(anchor="w", pady=(0, 4))
+        ttk.Checkbutton(over, text="Click the map to mark a point"
+                               " (right-click undoes)",
+                        variable=self._picking_overfly,
+                        command=self._overfly_mode_changed).pack(anchor="w")
+        self.overfly_list = tk.Listbox(over, height=4)
+        self.overfly_list.pack(fill="x", pady=2)
+        ob = ttk.Frame(over); ob.pack(fill="x", pady=(0, 4))
+        ttk.Button(ob, text="Import points...",
+                   command=self.on_import_detections).pack(side="left")
+        ttk.Button(ob, text="Remove",
+                   command=self.on_remove_overfly).pack(side="left", padx=4)
+        ttk.Button(ob, text="Clear",
+                   command=self.on_clear_overfly).pack(side="left")
+        otol = ttk.Frame(over); otol.pack(fill="x")
+        ttk.Label(otol, text="Counts as over within").pack(side="left")
+        self.vars["overfly_tolerance_ft"] = tk.StringVar(value="8")
+        ttk.Entry(otol, textvariable=self.vars["overfly_tolerance_ft"],
+                  width=6).pack(side="left", padx=4)
+        ttk.Label(otol, text="ft").pack(side="left")
+        ttk.Label(over, wraplength=300, foreground="#555555",
+                  text="The down beam's strip is about 2 x depth x tan(22.5 deg) "
+                       "wide: 4 ft either side in 10 ft of water, 8 ft in 20 ft. "
+                       "A mark the grid already crosses costs nothing.").pack(
+            anchor="w", pady=(2, 0))
+
+        no_go = self._section(left, "5. No-go areas")
         ttk.Checkbutton(no_go, text="Click to draw a no-go area"
                         " (right-click closes)",
                         variable=self._drawing_no_go,
@@ -309,7 +345,7 @@ class SurveyPlannerApp(tk.Tk):
                   foreground="#777", wraplength=260,
                   justify="left").pack(anchor="w")
 
-        params = self._section(left, "5. Parameters")
+        params = self._section(left, "6. Parameters")
         for key, label, default in (
             ("spacing_ft", "Line spacing (ft)", 40.0),
             ("setback_ft", "Min distance from shore (ft)", 50.0),
@@ -366,7 +402,7 @@ class SurveyPlannerApp(tk.Tk):
                 self.shore_var]:
             var.trace_add("write", lambda *_a: self._estimate_soon())
 
-        plan = self._section(left, "6. Plan")
+        plan = self._section(left, "7. Plan")
         self.tree = ttk.Treeview(plan, columns=("day", "lines", "mi", "hrs"),
                                  show="headings", height=8)
         for col, text, width in (("day", "day", 40), ("lines", "lines", 50),
@@ -378,7 +414,7 @@ class SurveyPlannerApp(tk.Tk):
         ttk.Button(plan, text="Delete selected line",
                    command=self.on_delete_line).pack(fill="x", pady=(4, 0))
 
-        export = self._section(left, "7. Export")
+        export = self._section(left, "8. Export")
         ttk.Button(export, text="GPX (per day)...",
                    command=lambda: self.on_export("gpx")).pack(fill="x")
         ttk.Button(export, text="QGroundControl .plan (per day)...",
@@ -899,6 +935,10 @@ class SurveyPlannerApp(tk.Tk):
             return self._no_go_click(event)
         if self._drawing_roi.get():
             return self._roi_click(event)
+        if self._picking_overfly.get():
+            if event.button == 3:
+                return self._undo_overfly()
+            return self._overfly_click(event)
         if self._picking_access.get():
             if event.button == 3:            # right-click undoes the last mark
                 return self._undo_access()
@@ -920,6 +960,123 @@ class SurveyPlannerApp(tk.Tk):
         self._say(f"{name} snapped {moved:.0f} ft onto the shoreline.")
         self._remember_access()
         self._draw()
+
+    def _overfly_mode_changed(self):
+        """One picking mode at a time, or a click means two things at once."""
+        if self._picking_overfly.get():
+            self._picking_access.set(False)
+            self._drawing_no_go.set(False)
+            self._drawing_roi.set(False)
+            self._say("Click each place the boat should pass directly over.")
+
+    def _overfly_click(self, event):
+        lon, lat = self.frame.to_lonlat(event.xdata, event.ydata)
+        self._add_overfly(lon, lat, f"OVER {len(self.overfly)+1}")
+        self._draw()
+
+    def _add_overfly(self, lon, lat, name):
+        self.overfly.append({"lonlat": (lon, lat), "name": name})
+        self.overfly_list.insert("end", f"{name}  {lat:.5f}, {lon:.5f}")
+
+    def _undo_overfly(self):
+        if not self.overfly:
+            return
+        gone = self.overfly.pop()
+        self.overfly_list.delete("end")
+        self._say(f"{gone['name']} removed.")
+        self._draw()
+
+    def on_remove_overfly(self):
+        picked = list(self.overfly_list.curselection())
+        if not picked:
+            return
+        for i in reversed(picked):
+            del self.overfly[i]
+            self.overfly_list.delete(i)
+        self._draw()
+
+    def on_clear_overfly(self):
+        self.overfly = []
+        self.overfly_list.delete(0, "end")
+        self._draw()
+
+    def on_import_detections(self):
+        """
+        Take marks from a file: a detector's output, the chart server's
+        objects layer, or the waypoints dropped by hand in the viewer.
+
+        Not all of them, and that is the point. A detector's output is a list
+        of maybes; which maybes are worth driving a line over is a judgement
+        about this survey, so the classes and the confidence floor are asked
+        for rather than assumed. Waypoints arrive as one class of their own,
+        so a file of those is a single tick.
+        """
+        from planner import overfly as overfly_mod
+
+        path = filedialog.askopenfilename(
+            title="Points to drive over",
+            filetypes=[("Detections or waypoints", "*.geojson *.json"),
+                       ("All files", "*.*")],
+            initialdir=workspace.output_dir())
+        if not path:
+            return
+        try:
+            found = overfly_mod.read_points(path)
+        except (OSError, ValueError) as exc:
+            return messagebox.showerror("Import points", str(exc))
+
+        counts = overfly_mod.classes_in(found)
+        with_conf = [d["confidence"] for d in found if d["confidence"] is not None]
+        chooser = tk.Toplevel(self)
+        chooser.title("Import points")
+        chooser.transient(self)
+        body = ttk.Frame(chooser, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text=f"{len(found)} point(s) in "
+                             f"{os.path.basename(path)}").pack(anchor="w")
+        ttk.Label(body, text="Which to drive over:",
+                  foreground="#555555").pack(anchor="w", pady=(6, 2))
+        picks = {}
+        for name, n in counts:
+            var = tk.BooleanVar(value=True)
+            ttk.Checkbutton(body, text=f"{name}  ({n})", variable=var).pack(anchor="w")
+            picks[name] = var
+        row = ttk.Frame(body); row.pack(fill="x", pady=(8, 0))
+        ttk.Label(row, text="Confidence at least").pack(side="left")
+        conf = tk.StringVar(value="0")
+        ttk.Entry(row, textvariable=conf, width=6).pack(side="left", padx=4)
+        ttk.Label(body, foreground="#555555", wraplength=320,
+                  text=("Confidence runs %.2f to %.2f in this file."
+                        % (min(with_conf), max(with_conf))) if with_conf else
+                       "Nothing in this file carries a confidence, so a floor "
+                       "above 0 would drop every point.").pack(anchor="w",
+                                                               pady=(2, 0))
+
+        def take():
+            try:
+                floor = float(conf.get())
+            except ValueError:
+                floor = 0.0
+            classes = {n for n, v in picks.items() if v.get()}
+            chosen = overfly_mod.select(found, classes=classes,
+                                        min_confidence=floor)
+            chooser.destroy()
+            if not chosen:
+                return messagebox.showinfo(
+                    "Import points",
+                    "Nothing matched those filters, so nothing was added.")
+            start = len(self.overfly)
+            for i, d in enumerate(chosen, start=1):
+                label = d["name"] or d["cls"]
+                self._add_overfly(d["lon"], d["lat"], f"{label}"[:28]
+                                  or f"OVER {start+i}")
+            self._say(f"{len(chosen)} of {len(found)} point(s) added to drive over.")
+            self._draw()
+
+        feet = ttk.Frame(chooser, padding=(12, 0, 12, 12)); feet.pack(fill="x")
+        ttk.Button(feet, text="Cancel", command=chooser.destroy).pack(side="right")
+        ttk.Button(feet, text="Add", command=take).pack(side="right", padx=(0, 6))
+        chooser.grab_set()
 
     def _undo_access(self):
         if not self.access:
@@ -1480,6 +1637,9 @@ class SurveyPlannerApp(tk.Tk):
             require_line_of_sight=self.los_var.get(),
             sight_range_ft=number("sight_range_ft", 0.0),
             coverage_pct=number("coverage_pct", 100.0),
+            overfly=[self.frame.to_ft(*p["lonlat"]) for p in self.overfly]
+                    if self.frame is not None else [],
+            overfly_tolerance_ft=number("overfly_tolerance_ft", 8.0),
             no_go=[z["geom"] for z in self.no_go],
             no_go_margin_ft=number("no_go_margin_ft", 25.0),
             shore_pass=self.shore_var.get(),
@@ -1938,6 +2098,17 @@ class SurveyPlannerApp(tk.Tk):
         elif self.roi_pts:
             self.ax.plot([p[0] for p in self.roi_pts], [p[1] for p in self.roi_pts],
                          "o--", color="#ffd24d", linewidth=1.0, markersize=4)
+
+        # Points to drive over, in the same cyan the down-sonar layer uses in
+        # the viewer. Drawn after the lines so a mark is never hidden under
+        # the line that was laid to reach it.
+        if self.overfly:
+            lons = [p["lonlat"][0] for p in self.overfly]
+            lats = [p["lonlat"][1] for p in self.overfly]
+            self.ax.plot(lons, lats, "o", color="#4fd8e4", markersize=7,
+                         markerfacecolor="none", markeredgewidth=1.6, zorder=6)
+            self.ax.plot(lons, lats, "+", color="#4fd8e4", markersize=9,
+                         markeredgewidth=1.2, zorder=6)
 
         # No-go areas in red, filled, over everything the boat may use, so
         # a line that should not be there is obvious rather than inferred.

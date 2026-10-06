@@ -395,6 +395,15 @@
    * the useful cut - unless Settings asks for all of them.
    */
   async function renderPreviews() {
+    // Off entirely is a setting because a full library is a lot of lines on
+    // one screen: every survey ever built draws its outline and its trackline
+    // over the chart being read, and on a laptop with a dozen of them the
+    // water disappears under other people's surveys.
+    if (!Prefs.showPreviews) {
+      ChartMap.setPreviewAreas({ type: 'FeatureCollection', features: [] });
+      ChartMap.setPreviewTracks({ type: 'FeatureCollection', features: [] });
+      return;
+    }
     const wanted = catalog.locations.filter(loc => {
       const data = loc.data || {};
       if (!data.boundary && !data.track) return false;
@@ -1545,7 +1554,9 @@
     $('setEscalate').checked = Prefs.alarmEscalate;
     $('setCenterGps').checked = Prefs.startCenterOnGps;
     $('setKeepAwake').checked = Prefs.keepAwake;
+    $('setShowPreviews').checked = Prefs.showPreviews;
     $('setPreviews').checked = Prefs.alwaysShowPreviews;
+    $('setPreviews').disabled = !Prefs.showPreviews;
     $('setDevData').checked = Prefs.devData;
     refreshOfflineState();
     $('settingsDialog').showModal();
@@ -1647,6 +1658,13 @@
     $('setEscalate').addEventListener('change', e => { Prefs.alarmEscalate = e.target.checked; });
     $('setCenterGps').addEventListener('change', e => { Prefs.startCenterOnGps = e.target.checked; });
     $('setKeepAwake').addEventListener('change', e => { Prefs.keepAwake = e.target.checked; });
+    $('setShowPreviews').addEventListener('change', e => {
+      Prefs.showPreviews = e.target.checked;
+      // "Always show" only means anything when they are shown at all, so it
+      // greys out rather than sitting there ticked and doing nothing.
+      $('setPreviews').disabled = !e.target.checked;
+      renderPreviews();
+    });
     $('setPreviews').addEventListener('change', e => {
       Prefs.alwaysShowPreviews = e.target.checked;
       renderPreviews();

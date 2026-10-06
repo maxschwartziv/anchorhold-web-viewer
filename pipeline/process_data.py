@@ -957,11 +957,37 @@ def usable_mosaics(tif_paths: list) -> list:
 SONAR_PLATEAU_END = 0.6     # past this the return weakens and the footprint grows
 SONAR_FAR_FLOOR = 0.35      # what the outermost ground range is still worth
 SONAR_QUALITY_CELL_M = 1.0  # quality varies over metres, not pixels
-# How sharply blending favours the better look. Cubed, a nadir score of
-# 0.2 weighs 0.008 against a good look's 1.0 - so a poor pass drops out
-# where anything better covers the ground, while two comparable passes
-# still average and shed speckle.
-SONAR_BLEND_POWER = 3.0
+# Blending is off. The reasoning below is kept because the idea is sound and
+# the implementation worked; what failed was the premise.
+#
+# The claim was that averaging two passes sheds speckle, the way multi-look
+# averaging has always worked in radar and sonar. Measured over the whole
+# overlap of an 8-pass Indian Hills survey, it does not:
+#
+#                      native (0.019 m)   0.15 m    stdev
+#   first-file-wins            21.419     26.291     65.1
+#   best look wins             21.411     26.024     65.2
+#   blended                    18.862     22.161     57.5
+#   blended vs order           -11.9%     -15.7%    -11.7%
+#
+# Shedding speckle means pixel-scale variation falling FASTER than texture.
+# It fell slower: the high-to-low ratio went from 0.815 to 0.851, up 4.5%.
+# Everything dropped together, so what the blend did was flatten contrast,
+# and it took slightly more texture than noise with it.
+#
+# The likely reason is in the note at the end of merge_sonar_by_quality: the
+# residual registration error between passes is one to four metres, which at
+# 0.0188 m/px is 53 to 213 pixels. Two views of the same ground offset by
+# that much do not average into a cleaner look at it; they blur.
+#
+# What would make it worth revisiting is registration. Cross-correlate the
+# overlap and shift one pass onto the other before averaging, and the premise
+# becomes true again - the looks would then actually be of the same ground.
+# Until then the merge keeps the single best look, which the same measurement
+# shows is where the real win is: quality picks a different pass from file
+# order on 76.4% of the overlap, by 54 of 255 on average.
+#
+# SONAR_BLEND_POWER = 3.0   # cubed, a nadir look at 0.2 carried 0.008
 
 
 def transect_tracks(meta_csv: str, log=print) -> dict:
@@ -1061,6 +1087,38 @@ def _quality_raster(src, track):
     return quality.reshape(rows, cols), west, north, cell
 
 
+def quality_at(quality, q_west, q_north, cell, xs, ys):
+    """
+    Look a block's pixels up in the coarse quality grid, interpolating.
+
+    Nearest-neighbour here is what put a staircase in the seam. Quality is
+    solved on a 1 m grid and the chart is 0.019 m/px, so rounding to the
+    nearest cell quantises the boundary between two passes into 53-pixel
+    treads - and a pixel one tread over gets handed to the worse pass for no
+    reason but the rounding.
+
+    Interpolating moves no pixel value and averages no look: the winner is
+    still one pass's sample, untouched. It only puts the boundary where the
+    two scores genuinely cross, instead of where the grid happened to fall.
+
+    The grid is separable - one row index per row, one column index per
+    column - so this is four outer-product gathers rather than a resample.
+    """
+    rows, cols = quality.shape
+    fr = np.clip((q_north - ys) / cell - 0.5, 0, rows - 1)
+    fc = np.clip((xs - q_west) / cell - 0.5, 0, cols - 1)
+    r0 = np.floor(fr).astype(int)
+    c0 = np.floor(fc).astype(int)
+    r1 = np.minimum(r0 + 1, rows - 1)
+    c1 = np.minimum(c0 + 1, cols - 1)
+    wr = (fr - r0).astype("float32")[:, None]
+    wc = (fc - c0).astype("float32")[None, :]
+    return ((1 - wr) * (1 - wc) * quality[np.ix_(r0, c0)]
+            + (1 - wr) * wc * quality[np.ix_(r0, c1)]
+            + wr * (1 - wc) * quality[np.ix_(r1, c0)]
+            + wr * wc * quality[np.ix_(r1, c1)]).astype("float32")
+
+
 def mask_mosaics_to_plateau(tif_paths: list, out_dir: str, tracks: dict,
                             min_quality: float = 1.0, log=print) -> list:
     """
@@ -1108,11 +1166,7 @@ def mask_mosaics_to_plateau(tif_paths: list, out_dir: str, tracks: dict,
                         window.row_off, window.row_off + data.shape[0]) + 0.5) * res_y
                     xs = src.bounds.left + (np.arange(
                         window.col_off, window.col_off + data.shape[1]) + 0.5) * res_x
-                    qr = np.clip(((q_north - ys) / cell).astype(int),
-                                 0, quality.shape[0] - 1)
-                    qc = np.clip(((xs - q_west) / cell).astype(int),
-                                 0, quality.shape[1] - 1)
-                    q = quality[np.ix_(qr, qc)]
+                    q = quality_at(quality, q_west, q_north, cell, xs, ys)
                     valid = data > 0
                     keep = valid & (q >= min_quality)
                     seen_total += int(valid.sum())
@@ -1129,38 +1183,25 @@ def mask_mosaics_to_plateau(tif_paths: list, out_dir: str, tracks: dict,
 
 
 def merge_sonar_by_quality(tif_paths: list, out_tif: str, tracks: dict,
-                           blend: bool = True, log=print):
+                           log=print):
     """
-    Merge overlapping mosaics by quality: either keep the best look at each
-    pixel, or combine the looks in proportion to how good each one is.
+    Merge overlapping mosaics by quality: at each pixel, keep the look from
+    the pass that saw that ground best.
 
     What this replaces is rasterio's default, where the first file in the list
     that happens to hold data wins. That settles a real question - which pass
     saw this ground better - by reference to a sort order, which is no answer
     at all.
 
-    blend=False   The best-scoring pass takes the pixel outright.
-    blend=True    Every pass contributes, weighted by its own score raised to
-                  SONAR_BLEND_POWER. This is worth doing because the passes
-                  disagree in a specific and useful way: measured on Indian
-                  Hills, two passes over the same ground correlate at 0.004 at
-                  native resolution - below the 0.013 noise floor - but at 0.6 m
-                  they correlate at 0.085-0.165, six to twelve times the floor.
-                  They agree about the sea floor and disagree about speckle,
-                  which is exactly the case where averaging helps: it is the
-                  same multi-look averaging that radar and sonar have always
-                  used to trade independent looks for less noise. Measured on
-                  one overlap, averaging two passes took the standard deviation
-                  from 62.5 to 48.7 and neighbouring-pixel variation from 20.9
-                  to 16.7, close to the root-two you would predict.
+    This is where the win is, and it is a large one: over an 8-pass Indian
+    Hills survey, 54.4% of the charted ground is seen by two or more passes,
+    and on 76.4% of that overlap the best-scoring pass is not the one file
+    order would have picked - differing by 54 of 255 on average.
 
-                  The weighting is what makes it safe. A plain average keeps
-                  both passes' nadir stripes at half strength each, so the
-                  artefact survives in two places instead of one. Cubing the
-                  score means a nadir look at 0.2 carries 0.008 against a good
-                  look's 1.0 - under a percent - so it drops out where anything
-                  better covers the ground, while two comparable looks still
-                  average properly.
+    There was a second mode that averaged the overlapping looks together,
+    weighted by score. It is commented out above and below rather than
+    deleted: the idea is sound, the code worked, and only the premise failed.
+    See the note on SONAR_BLEND_POWER for the measurement that retired it.
 
     The residual registration error between passes is around one to four metres
     (from the coarse-scale correlation above, and consistent with the metadata's
@@ -1179,12 +1220,13 @@ def merge_sonar_by_quality(tif_paths: list, out_tif: str, tracks: dict,
         height = int(round((north - min(s.bounds.bottom for s in srcs)) / res_y))
         log(f"      Output grid {width:,} x {height:,} px at {res_x:.4f} m", flush=True)
 
-        # Winner-take-all needs the running best value and its score; blending
-        # needs the weighted sum and the weight. Either way two full-grid
+        # The running best value and the score that won it. Two full-grid
         # accumulators, which is where the memory goes on a big survey.
-        best = np.zeros((height, width), dtype="uint8" if not blend else "float32")
+        # (Blending needed the same two, as a weighted sum and its weight,
+        # with best as float32.)
+        best = np.zeros((height, width), dtype="uint8")
         best_q = np.zeros((height, width), dtype="float32")
-        log(f"      {'blending by quality' if blend else 'best look wins'}", flush=True)
+        log("      best look wins", flush=True)
 
         for index, src in enumerate(srcs):
             track = tracks.get(index)
@@ -1216,40 +1258,38 @@ def merge_sonar_by_quality(tif_paths: list, out_tif: str, tracks: dict,
                         window.row_off, window.row_off + data.shape[0]) + 0.5) * res_y
                     xs = src.bounds.left + (np.arange(
                         window.col_off, window.col_off + data.shape[1]) + 0.5) * res_x
-                    qr = np.clip(((q_north - ys) / cell).astype(int),
-                                 0, quality.shape[0] - 1)
-                    qc = np.clip(((xs - q_west) / cell).astype(int),
-                                 0, quality.shape[1] - 1)
-                    q = quality[np.ix_(qr, qc)]
+                    q = quality_at(quality, q_west, q_north, cell, xs, ys)
 
                 view_v = best[r0:r1, c0:c1]
                 view_q = best_q[r0:r1, c0:c1]
-                if blend:
-                    w = np.where(valid, q ** SONAR_BLEND_POWER, 0.0).astype("float32")
-                    view_v += w * data
-                    view_q += w
-                    kept += int((w > 0).sum())
-                else:
-                    wins = valid & (q > view_q)
-                    view_v[wins] = data[wins]
-                    view_q[wins] = q[wins]
-                    kept += int(wins.sum())
+                # The blended alternative, kept for whoever registers the
+                # passes properly and makes averaging worth doing:
+                #
+                #   w = np.where(valid, q ** SONAR_BLEND_POWER, 0.0).astype("float32")
+                #   view_v += w * data
+                #   view_q += w
+                #   kept += int((w > 0).sum())
+                wins = valid & (q > view_q)
+                view_v[wins] = data[wins]
+                view_q[wins] = q[wins]
+                kept += int(wins.sum())
             log(f"      [{index+1}/{len(srcs)}] "
                 f"{os.path.basename(tif_paths[index])}: "
-                f"{kept:,} px {'contributed' if blend else 'kept'}", flush=True)
+                f"{kept:,} px kept", flush=True)
     finally:
         for s in srcs:
             s.close()
 
     covered = int((best_q > 0).sum())
     log(f"      {covered:,} px carry data, decided by quality rather than file order")
-    if blend:
-        # 0 is the nodata value, so an uncovered pixel has to stay 0 and a
-        # covered one has to stay off it: round up into 1 rather than down to
-        # nothing, or the faintest real backscatter reads as no survey at all.
-        with np.errstate(invalid="ignore", divide="ignore"):
-            best = np.where(best_q > 0, best / np.maximum(best_q, 1e-6), 0.0)
-        best = np.where(best_q > 0, np.maximum(np.rint(best), 1), 0).astype("uint8")
+    # Blending divided the weighted sum by its weight here. 0 is the nodata
+    # value, so an uncovered pixel had to stay 0 and a covered one had to stay
+    # off it - rounding up into 1 rather than down to nothing, or the faintest
+    # real backscatter reads as no survey at all:
+    #
+    #   with np.errstate(invalid="ignore", divide="ignore"):
+    #       best = np.where(best_q > 0, best / np.maximum(best_q, 1e-6), 0.0)
+    #   best = np.where(best_q > 0, np.maximum(np.rint(best), 1), 0).astype("uint8")
 
     transform = rasterio.transform.from_origin(west, north, res_x, res_y)
     with rasterio.open(out_tif, "w", driver="GTiff", height=height, width=width,
@@ -1277,8 +1317,7 @@ def find_sonar_meta(tif_paths: list) -> str:
     return ""
 
 
-def merge_sonar(tif_paths: list, out_tif: str, meta_csv: str = "",
-                blend: bool = True):
+def merge_sonar(tif_paths: list, out_tif: str, meta_csv: str = ""):
     print("\n[2/3] Merging sonar mosaic tiles...")
     for p in tif_paths:
         if not os.path.exists(p):
@@ -1298,7 +1337,7 @@ def merge_sonar(tif_paths: list, out_tif: str, meta_csv: str = "",
                 print(f"      ({exc} - falling back to first-file-wins)")
             else:
                 if len(tracks) >= len(tif_paths):
-                    merge_sonar_by_quality(tif_paths, out_tif, tracks, blend=blend)
+                    merge_sonar_by_quality(tif_paths, out_tif, tracks)
                     return
                 print(f"      ({len(tracks)} transects for {len(tif_paths)} mosaics "
                       f"- cannot match them up, falling back to first-file-wins)")
@@ -1604,10 +1643,10 @@ def parse_args(argv=None):
     p.add_argument("--sonar", nargs="*", default=SONAR_TILES,
                    help="sonar mosaic GeoTIFF(s); pass none to skip the sonar layer")
     p.add_argument("--sonar-best-only", action="store_true",
-                   help="where passes overlap, show the single best look rather "
-                        "than blending them. Blending averages the passes in "
-                        "proportion to quality, which sheds speckle; this keeps "
-                        "one look untouched instead")
+                   help="accepted and ignored: showing the single best look "
+                        "where passes overlap is now the only behaviour. "
+                        "Blending was measured to flatten contrast rather "
+                        "than shed speckle and has been switched off")
     p.add_argument("--sonar-meta", default="",
                    help="PINGMapper ping metadata CSV (…/meta/B002_ss_port_meta.csv). "
                         "Lets overlapping mosaics be merged by which pass imaged the "
@@ -1779,8 +1818,7 @@ def main(argv=None):
         return
 
     if sonar_tiles:
-        merge_sonar(sonar_tiles, sonar_tif, meta_csv=args.sonar_meta,
-                    blend=not args.sonar_best_only)
+        merge_sonar(sonar_tiles, sonar_tif, meta_csv=args.sonar_meta)
 
     highest = ZOOM_MAX == "highest"
     if ZOOM_MIN == "lowest":
