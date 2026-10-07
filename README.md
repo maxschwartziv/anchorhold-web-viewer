@@ -141,24 +141,24 @@ first.
 
 | Program | Responsible for |
 | --- | --- |
-| `pipeline/add_survey_locations.py` | The build screen. Keeps the survey catalogue and each survey's processing settings (mosaic toning, sonar quality, ping filters, substrate, rock, bottom objects), and runs the build steps below in order |
+| `pipeline/add_survey_locations.py` | The build screen. Keeps the survey catalogue and each survey's processing settings (mosaic toning, sonar quality, ping filters, substrate, rock, bottom objects), and runs the build steps below in order. **Sonar quality:** the *Sonar quality* section of the Mosaic image panel holds the four settings and passes them to `process_data.py` at build time, never to the PINGMapper decode |
 | `pipeline/any_recording.py` | Reads any recording PINGVerter supports into the shape the Recording Fixer expects |
 | `pipeline/appicon.py` | The AnchorHold icon on every desktop window |
 | `pipeline/bag_import.py` | Turns a BAG bathymetric grid into soundings the pipeline can chart |
 | `pipeline/build_preview.py` | A survey's lightweight preview, its boundary and track, shown before its charts are downloaded |
 | `pipeline/chart_bundle.py` | Packs one built survey into a single file either app can install |
-| `pipeline/depth_csv_from_sonar.py` | Runs PINGMapper on a raw recording and keeps the depth CSV, side scan mosaics and substrate rasters |
+| `pipeline/depth_csv_from_sonar.py` | Runs PINGMapper on a raw recording and keeps the depth CSV, side scan mosaics and substrate rasters. **Sonar quality:** produces its inputs - one mosaic per transect and the ping metadata CSV the scores are measured from - but judges nothing itself |
 | `pipeline/down_sonar.py` | Turns the down-looking beam into a waterfall the app scrolls along the track |
 | `pipeline/extract_constants.py` | Fits harmonic tide constants for Santa Rosalía from online predictions |
 | `pipeline/find_surveys.py` | Searches public archives for surveys this pipeline can use |
 | `pipeline/fix_recording.py` | The Recording Fixer: look over a recording and cut out what should not reach the chart |
 | `pipeline/ghost_vision.py` | Drives GhostVision to find objects on the bottom and returns them as map points |
 | `pipeline/gsf_import.py` | Turns a GSF multibeam file into soundings and a backscatter mosaic |
-| `pipeline/merge_locations.py` | Merges finished surveys into one, so their charts show together under one pin |
+| `pipeline/merge_locations.py` | Merges finished surveys into one, so their charts show together under one pin. **Sonar quality:** not used here - where two surveys overlap, the later one is laid over the earlier |
 | `pipeline/package_web.py` | A standalone copy of the web app for another PC |
 | `pipeline/patch_utm_zone.py` | Fixes the UTM zone bug in an installed PINGVerter/PINGMapper |
 | `pipeline/places_to_objects.py` | Turns a list of places into an objects layer the viewer imports |
-| `pipeline/process_data.py` | Builds the chart: depth grid, contours and shallow bands, the sonar merge (each overlapping pixel taken from the pass that saw it best), and the MBTiles for every layer |
+| `pipeline/process_data.py` | Builds the chart: depth grid, contours and shallow bands, the sonar merge, and the MBTiles for every layer. **Sonar quality:** does the work - reads each pass's track, depth and range from the ping metadata, scores every pixel by its distance from its own track (poor under the boat, best mid-swath, fading toward max range), and keeps the best-scoring pass where passes overlap, a window at a time. Takes the `--sonar-*` settings |
 | `pipeline/release_web.py` | The zips attached to a GitHub release, with the charts split out |
 | `pipeline/repair_humminbird.py` | Rebuilds the header and ping index of a Humminbird recording cut short by a power loss |
 | `pipeline/rock_map.py` | Drives RockMapper to predict rocky habitat from the side scan mosaics |
