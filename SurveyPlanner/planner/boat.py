@@ -1,5 +1,5 @@
 """
-What the boat needs besides the mission: an ArduPilot fence, and the chart.
+What the boat needs with the mission: an ArduPilot fence, and the chart.
 
 **The fence.** One inclusion polygon - the water - and one exclusion polygon for
 every island and no-go area. ArduPilot Rover keeps fence points in a fixed
@@ -176,20 +176,29 @@ def write_package(folder, frame, water, no_go, grids=(), launches=(), speed_mph:
     is uploaded with the day's mission. Every track is checked against its
     fence, because a line the fence cuts trips FENCE_ACTION mid-survey.
     Without tracks there is one fence for the whole lake.
+
+    Each day's mission is written beside its fence as a Mission Planner
+    .waypoints file, so the two that have to be uploaded together come out of
+    one folder together. The first launch is its home.
     """
-    from planner import depthgrid
+    from planner import depthgrid, exporters
     from shapely.geometry import LineString
     from shapely.ops import unary_union
 
     zones = [z["geom"] if isinstance(z, dict) else z for z in no_go]
     runs = [("day_%02d_" % (i + 1), [t]) for i, t in enumerate(tracks) if len(t) > 1] \
         if tracks else [("", [])]
+    home = frame.to_lonlat(*launches[0]) if len(launches) else None
     fences, files = [], []
     for prefix, day_tracks in runs:
         area = plan_area(day_tracks, track_margin_ft) if day_tracks else None
         inclusion, exclusions, tol = build_fence(water, no_go, launches,
                                                  budget_bytes=budget_bytes, area=area)
         files += write_fence_files(folder, frame, inclusion, exclusions, prefix)
+        if day_tracks:
+            files.append(exporters.write_mp_waypoints(
+                os.path.join(folder, prefix + "mission.waypoints"), day_tracks[0],
+                frame, speed_mph, home))
         allowed = inclusion.difference(unary_union(exclusions)) if exclusions else inclusion
         usable = water if area is None else water.intersection(area)
         usable = usable.difference(unary_union(zones)) if zones else usable
@@ -226,6 +235,8 @@ def write_package(folder, frame, water, no_go, grids=(), launches=(), speed_mph:
         f.write(
             "Boat package from Survey Planner\n\n"
             + ("day_NN_fence.*   one fence per day - upload it with that day's mission\n"
+               "day_NN_mission.waypoints\n"
+               "                 Mission Planner: Plan > Load WP File, then Write WPs\n"
                if tracks else "")
             + "*fence.waypoints Mission Planner: Plan > Fence > Load (inclusion + exclusions)\n"
             "*fence.plan      QGroundControl: Plan > Open, then Upload (fence only)\n"

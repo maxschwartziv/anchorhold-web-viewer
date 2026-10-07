@@ -152,6 +152,8 @@ def main(lat=DEFAULT_LAT, lon=DEFAULT_LON) -> int:
                                        frame, settings.speed_mph)
         gj = exporters.write_geojson(os.path.join(out, "plan.geojson"), days,
                                      frame, access)
+        wpl = exporters.write_mp_day(os.path.join(out, "day_01.waypoints"), days[0],
+                                     frame, settings.speed_mph, access[0]["lonlat"])
         shoreline.save(body, os.path.join(out, "shoreline.json"))
     except Exception:
         check("export ran", False)
@@ -164,6 +166,7 @@ def main(lat=DEFAULT_LAT, lon=DEFAULT_LON) -> int:
           f"{len(payload['mission']['items'])} items")
     check("plan is a boat mission", payload["mission"]["vehicleType"] == 11)
     check("geojson written", len(json.load(open(gj))["features"]) > 0)
+    waypoints_checks(wpl, payload, days[0], frame, (lon, lat), settings.speed_mph)
     reloaded = shoreline.load(os.path.join(out, "shoreline.json"))
     check("shoreline round-trips", reloaded["name"] == body["name"])
     print(f"\n   files in {out}")
@@ -177,6 +180,47 @@ def main(lat=DEFAULT_LAT, lon=DEFAULT_LON) -> int:
         return 1
     print("ALL CHECKS PASSED")
     return 0
+
+
+def read_waypoints(path):
+    """A .waypoints file as Mission Planner reads it: header, then 12 fields a row."""
+    with open(path) as fh:
+        lines = fh.read().splitlines()
+    rows = [line.split("\t") for line in lines[1:] if line]
+    return lines[0], rows
+
+
+def waypoints_checks(path, plan, day, frame, home_lonlat, speed_mph):
+    """The Mission Planner mission: well formed, and the same route as the .plan."""
+    header, rows = read_waypoints(path)
+    check("waypoints header is QGC WPL 110", header == "QGC WPL 110")
+    check("every row has 12 fields", all(len(r) == 12 for r in rows),
+          f"{len(rows)} rows")
+    check("rows are numbered in order",
+          [int(r[0]) for r in rows] == list(range(len(rows))))
+    home = rows[0]
+    check("row 0 is home at the launch",
+          home[1] == "1" and int(home[3]) == 16
+          and abs(float(home[8]) - home_lonlat[1]) < 1e-7
+          and abs(float(home[9]) - home_lonlat[0]) < 1e-7)
+    check("row 1 sets the planned speed",
+          int(rows[1][3]) == 178
+          and abs(float(rows[1][5]) - speed_mph * 0.44704) < 0.01, rows[1][5] + " m/s")
+    points = [(float(r[8]), float(r[9])) for r in rows[2:]]
+    check("the rest are boat waypoints",
+          all(int(r[3]) == 16 and r[2] == "3" and r[10] == "0" for r in rows[2:]))
+    track = [frame.to_lonlat(x, y) for x, y in planning.mission_track(day)]
+    check("waypoints follow the mission track", len(points) == len(track) and all(
+        abs(a - lat) < 1e-7 and abs(b - lon) < 1e-7
+        for (a, b), (lon, lat) in zip(points, track)), f"{len(points)} waypoints")
+    plan_points = []
+    for item in plan["mission"]["items"]:
+        p = (item["params"][4], item["params"][5])
+        if not plan_points or p != plan_points[-1]:
+            plan_points.append(p)
+    check("same route as the .plan", len(plan_points) == len(points) and all(
+        abs(a - c) < 1e-7 and abs(b - d) < 1e-7
+        for (a, b), (c, d) in zip(points, plan_points)))
 
 
 def depth_grid_checks(frame, poly, out):
@@ -243,6 +287,12 @@ def depth_grid_checks(frame, poly, out):
           " (transits between lines are reported, not failed)")
     chart = os.path.join(out, "boat", "chart", "depth_grid.bin")
     check("chart written for the SD card", os.path.getsize(chart) == cols * rows * 4)
+    missions = sorted(f for f in os.listdir(os.path.join(out, "boat"))
+                      if f.endswith("_mission.waypoints"))
+    check("a Mission Planner mission beside each day's fence",
+          len(missions) == len(info["fences"]) and all(
+              os.path.isfile(os.path.join(out, "boat", m.replace("mission", "fence")))
+              for m in missions), ", ".join(missions))
 
     recording_checks(frame, poly, out)
 
