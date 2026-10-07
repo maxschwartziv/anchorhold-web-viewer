@@ -1,16 +1,20 @@
 """
 Getting a plan onto the water.
 
-Two formats, because neither is enough on its own:
+Three formats, because no one of them is read by everything:
 
-  GPX   Chartplotters, handhelds, phone navigation apps. Universal, no schema
-        to argue with. QGroundControl will not read it.
-  .plan QGroundControl's own format. Written here as plain waypoint items
-        rather than Survey complex items: the Survey item's schema shifts
-        between QGC releases and is strictly validated - a file that loads on
-        one version is rejected on the next for a missing key. A list of
-        MAV_CMD_NAV_WAYPOINT items has almost nothing to get wrong, and it
-        flies the lines as planned instead of regenerating its own.
+  GPX         Chartplotters, handhelds, phone navigation apps. Universal, no
+              schema to argue with. Neither ground station will fly it.
+  .plan       QGroundControl's own format. Written here as plain waypoint
+              items rather than Survey complex items: the Survey item's schema
+              shifts between QGC releases and is strictly validated - a file
+              that loads on one version is rejected on the next for a missing
+              key. A list of MAV_CMD_NAV_WAYPOINT items has almost nothing to
+              get wrong, and it flies the lines as planned instead of
+              regenerating its own.
+  .waypoints  Mission Planner's own format, the QGC WPL 110 text file. The
+              same waypoints as the .plan, one tab-separated row per mission
+              item.
 """
 
 from __future__ import annotations
@@ -19,9 +23,14 @@ import json
 import os
 import xml.sax.saxutils as saxutils
 
+from .plan import mission_track
+
 MPH_TO_MS = 0.44704
 MAV_CMD_NAV_WAYPOINT = 16
+MAV_CMD_DO_CHANGE_SPEED = 178
+MAV_FRAME_GLOBAL = 0
 MAV_FRAME_GLOBAL_RELATIVE_ALT = 3
+SPEED_TYPE_GROUNDSPEED = 1
 MAV_TYPE_SURFACE_BOAT = 11
 MAV_AUTOPILOT_ARDUPILOTMEGA = 3
 
@@ -101,6 +110,54 @@ def write_qgc_plan(path: str, day, frame, speed_mph: float = 3.0,
     }
     _write(path, json.dumps(plan, indent=4))
     return path
+
+
+def write_mp_waypoints(path: str, track, frame, speed_mph: float = 3.0,
+                       home_lonlat=None) -> str:
+    """
+    One day as a Mission Planner .waypoints file. Plan > Load WP File.
+
+    `track` is the day's mission_track - every point the boat visits, in
+    local feet. It is the same sequence the .plan carries, less any point that
+    repeats the one before it, which would only be a zero-length leg.
+
+    Each row is index, current, frame, command, param1-4, latitude,
+    longitude, altitude, autocontinue. Row 0 is home: Mission Planner writes
+    it there and reads it back from there, and the autopilot replaces it with
+    wherever it is armed, so what is written only places the home marker on
+    the map until then - the launch, when there is one. Row 1 sets the ground
+    speed the day was planned and timed at, so the mission runs at that speed
+    whatever WP_SPEED was left at. Altitude is 0 throughout: it is a boat.
+    """
+    points = [frame.to_lonlat(x, y) for x, y in track]
+    if not points:
+        raise ValueError("nothing to export")
+    home_lon, home_lat = home_lonlat if home_lonlat is not None else points[0]
+
+    def row(index, current, frame_id, command, params, lat=0.0, lon=0.0):
+        return "\t".join(
+            [str(index), str(current), str(frame_id), str(command)]
+            + ["%g" % p for p in params]
+            + ["%.8f" % lat, "%.8f" % lon, "0", "1"])
+
+    rows = ["QGC WPL 110",
+            row(0, 1, MAV_FRAME_GLOBAL, MAV_CMD_NAV_WAYPOINT, (0, 0, 0, 0),
+                home_lat, home_lon),
+            # Throttle -1 leaves it alone.
+            row(1, 0, MAV_FRAME_GLOBAL_RELATIVE_ALT, MAV_CMD_DO_CHANGE_SPEED,
+                (SPEED_TYPE_GROUNDSPEED, round(speed_mph * MPH_TO_MS, 2), -1, 0))]
+    for index, (lon, lat) in enumerate(points, start=2):
+        rows.append(row(index, 0, MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                        MAV_CMD_NAV_WAYPOINT, (0, 0, 0, 0), lat, lon))
+    _write(path, "\n".join(rows) + "\n")
+    return path
+
+
+def write_mp_day(path: str, day, frame, speed_mph: float = 3.0,
+                 home_lonlat=None) -> str:
+    """write_mp_waypoints for one planned day, as the other exporters take it."""
+    return write_mp_waypoints(path, mission_track(day), frame, speed_mph,
+                              home_lonlat)
 
 
 def write_geojson(path: str, days, frame, access_points=None) -> str:

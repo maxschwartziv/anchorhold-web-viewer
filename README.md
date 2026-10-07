@@ -63,9 +63,11 @@ charge.
   clearance check measuring the whole mission track.
 - A live estimate of days, miles of line and computation time that follows
   every parameter, so the cost of closer spacing is visible before the run.
-- Exports a [QGroundControl](https://qgroundcontrol.com/) `.plan` and a
+- Exports a [QGroundControl](https://qgroundcontrol.com/) `.plan`, a
+  [Mission Planner](https://ardupilot.org/planner/) `.waypoints` mission and a
   [GPX](https://www.topografix.com/gpx.asp) track, one file per day, plus
-  GeoJSON of the whole plan for GIS.
+  GeoJSON of the whole plan for GIS. The boat package puts each day's
+  Mission Planner mission beside that day's fence.
 
 Built on [Tkinter](https://docs.python.org/3/library/tkinter.html) and
 [matplotlib](https://matplotlib.org/) alone. It has its own dependencies, which
@@ -181,8 +183,8 @@ first.
 | `SurveyPlanner/planner/overfly.py` | Points the survey has to pass directly over |
 | `SurveyPlanner/planner/depthgrid.py` | Shallows from AnchorHold depth grids, and the chart the boat carries |
 | `SurveyPlanner/planner/humminbird.py` | Depth soundings straight out of a Humminbird recording |
-| `SurveyPlanner/planner/boat.py` | What goes to the boat with the mission: an ArduPilot fence and the chart |
-| `SurveyPlanner/planner/exporters.py` | Writes a plan out in the formats the boat and plotter take |
+| `SurveyPlanner/planner/boat.py` | The boat package: an ArduPilot fence per day (Mission Planner and QGroundControl), that day's Mission Planner mission beside it, the chart and the parameters |
+| `SurveyPlanner/planner/exporters.py` | Writes a plan out in the formats the boat and plotter take: QGroundControl `.plan`, Mission Planner `.waypoints`, GPX and GeoJSON |
 | `SurveyPlanner/planner/geometry.py` | Local coordinates, in feet |
 | `SurveyPlanner/planner/__init__.py` | Marks the planning engine as a package |
 | `object-detection/shadow_pair.py` | A classical detector that pairs a target's bright return with its shadow in side scan |

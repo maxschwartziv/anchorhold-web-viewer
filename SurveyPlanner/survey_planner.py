@@ -471,10 +471,12 @@ class SurveyPlannerApp(tk.Tk):
         ttk.Button(export, text="GPX (per day)...",
                    command=lambda: self.on_export("gpx")).pack(fill="x")
         ttk.Button(export, text="QGroundControl .plan (per day)...",
-                   command=lambda: self.on_export("plan")).pack(fill="x", pady=2)
+                   command=lambda: self.on_export("plan")).pack(fill="x", pady=(2, 0))
+        ttk.Button(export, text="Mission Planner .waypoints (per day)...",
+                   command=lambda: self.on_export("waypoints")).pack(fill="x", pady=2)
         ttk.Button(export, text="GeoJSON (whole plan)...",
                    command=lambda: self.on_export("geojson")).pack(fill="x")
-        ttk.Button(export, text="Boat package (fence + chart)...",
+        ttk.Button(export, text="Boat package (fence + chart + missions)...",
                    command=self.on_export_boat).pack(fill="x", pady=(2, 0))
 
         self.status = ttk.Label(left, text="Ready", foreground="#444",
@@ -1703,7 +1705,9 @@ class SurveyPlannerApp(tk.Tk):
                + " bytes, simplified up to " + format(info["tolerance_ft"], ".0f")
                + " ft, " + str(info["exclusions"]) + " exclusion(s)"
                + (", chart for the SD card" if self.depth_grids else ", no chart"
-                  " (load depth grids in section 4 to include one)") + ".")
+                  " (load depth grids in section 4 to include one)")
+               + (", and each day's mission for Mission Planner" if self.days else "")
+               + ".")
         if not self.days:
             msg += (" No plan computed, so the fence is the whole lake - compute"
                     " first to fence only the water the plan uses.")
@@ -2048,14 +2052,16 @@ class SurveyPlannerApp(tk.Tk):
                     os.path.join(folder, "survey_plan.geojson"),
                     self.days, self.frame, self.access))
             else:
+                home = self.access[0]["lonlat"] if self.access else None
                 for i, day in enumerate(self.days, start=1):
-                    name = f"day_{i:02d}.{'gpx' if kind == 'gpx' else 'plan'}"
-                    path = os.path.join(folder, name)
+                    path = os.path.join(folder, f"day_{i:02d}.{kind}")
                     if kind == "gpx":
                         written.append(exporters.write_gpx(
                             path, day, self.frame, f"day{i}", self.access))
+                    elif kind == "waypoints":
+                        written.append(exporters.write_mp_day(
+                            path, day, self.frame, self.settings.speed_mph, home))
                     else:
-                        home = self.access[0]["lonlat"] if self.access else None
                         written.append(exporters.write_qgc_plan(
                             path, day, self.frame, self.settings.speed_mph, home))
             if self.body:
