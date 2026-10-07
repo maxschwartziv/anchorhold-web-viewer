@@ -121,8 +121,12 @@ PREVIEW_FILES = ['boundary.geojson', 'track.geojson']
 # picking one and then changing a field is an ordinary thing to do rather than
 # a special case: the survey records the values, and the preset name is a label
 # for how they got there.
-Param = namedtuple('Param', 'key flag kind default label explain advice choices')
-Param.__new__.__defaults__ = ((),)
+#
+# A param with a section belongs to a later tool than the rest of its group, so
+# it is passed to that tool instead (see flags_for) and the window shows it
+# under its own heading (see SECTIONS).
+Param = namedtuple('Param', 'key flag kind default label explain advice choices section')
+Param.__new__.__defaults__ = ((), '')
 
 PARAMS = {
     # ── how the side scan mosaic is toned ──────────────────────────────────
@@ -180,6 +184,49 @@ PARAMS = {
               'Gain',
               'Overall brightness multiplier applied after EGN. 1 is off.',
               '1.'),
+
+        # Applied by process_data.py when the passes are merged into one
+        # chart, not by PINGMapper - see SECTIONS['quality'].
+        Param('sonar_nadir_per_depth', '--sonar-nadir-per-depth', 'float', 1.0,
+              'Nadir width (x depth)',
+              'How wide the poor strip under the boat is, as a multiple of the '
+              'water depth at each ping. Removing the water column stretches the '
+              'near-vertical samples over the most ground, so this strip is '
+              'smeared and glassy rather than textured. A pixel scores nearly 0 '
+              'right under the boat, rising to full at this distance out. 1 puts '
+              'the edge at 45 degrees, where the stretch drops under 1.4x.',
+              '1. Raise to 1.5-2 if your passes show a wide dark or smeared band '
+              'under the boat; lower to 0.5 if texture starts close in.',
+              section='quality'),
+        Param('sonar_plateau_end', '--sonar-plateau-end', 'float', 0.6,
+              'Best out to (fraction of range)',
+              'Where the good part of the swath ends, as a fraction of the range '
+              'the unit was set to. Inside it the beam meets the bottom at an '
+              'angle low enough to throw readable shadows and the footprint is '
+              'still small; past it the return weakens and pixels smear across '
+              'track.',
+              '0.6. Lower it if the outer edges of each pass look grainy; raise '
+              'toward 0.8 in clear water on a short range.',
+              section='quality'),
+        Param('sonar_far_floor', '--sonar-far-floor', 'float', 0.35,
+              'Worth at max range (0-1)',
+              'What a pixel at the very edge of the swath scores, falling '
+              'evenly from full at the end of the best part. It is weighed '
+              'against the strip under the boat: at 0.35 an edge pixel beats '
+              'the innermost 35% of another pass\'s nadir strip and loses to '
+              'the rest. Lower hands more of the overlap to whichever pass ran '
+              'closer.',
+              '0.35. Drop toward 0.1 when the lines overlap heavily and the '
+              'edges are poor.',
+              section='quality'),
+        Param('sonar_depth_window', '--sonar-depth-window', 'int', 51,
+              'Depth smoothing (pings)',
+              'The nadir width follows the depth ping by ping, smoothed with a '
+              'running median over this many pings so one bad bottom pick does '
+              'not notch the scores. Range is taken ping by ping as recorded, so '
+              'a range changed mid-pass applies from that ping on.',
+              '51. Raise it if the bottom pick is noisy; 1 turns smoothing off.',
+              section='quality'),
     ),
 
     # ── which pings reach the imagery ──────────────────────────────────────
@@ -366,6 +413,24 @@ GROUP_TITLES = {'mosaic': 'Mosaic image', 'track': 'Keep pings',
                 'substrate': 'Substrate', 'rock': 'Rock detail',
                 'ghost': 'Bottom objects'}
 
+# The heading, and what it is for, over each section's params in the window.
+SECTIONS = {
+    'quality': (
+        'Sonar quality',
+        'Where passes overlap, the chart shows the look from whichever pass saw '
+        'that ground best, judged by how far each pixel sat from its own boat '
+        'track: poor right under the boat, best through the middle of the '
+        'swath, fading toward the edge of range. These settings shape that '
+        'judgement. The right values depend on the sonar, its settings and the '
+        'water, so expect to tune them per survey.\n\n'
+        'They act when the passes are merged into one chart, after the mosaic '
+        'is made, so changing them never decodes the recording again - the '
+        'next Build only re-merges. The test swatch cannot show them: it is a '
+        'few chunks of one pass, with nothing overlapping. Without PINGMapper\'s '
+        'ping metadata beside the mosaics there is no track to measure from, '
+        'and the first file to cover a spot wins.'),
+}
+
 CUSTOM = 'Custom (values below)'
 
 
@@ -462,9 +527,13 @@ def describe_choice(group, choice):
             if choice['preset'] != 'custom' else CUSTOM)
 
 
-def flags_for(group, values):
+def flags_for(group, values, section=''):
     """
     The command-line flags one group's values come to.
+
+    Only the params in `section` - by default the group's own, unsectioned
+    ones - because a section's params are for a different tool, and the
+    group's own tool would refuse a flag it has never heard of.
 
     A flag that begins --no- turns something off, so the switch is passed
     when the setting is false rather than true: the window says 'Track
@@ -473,6 +542,8 @@ def flags_for(group, values):
     """
     flags = []
     for param in PARAMS[group]:
+        if param.section != section:
+            continue
         value = values.get(param.key, param.default)
         if param.kind == 'bool':
             wanted = not value if param.flag.startswith('--no-') else bool(value)
@@ -1610,7 +1681,7 @@ class ProcessingDialog(tk.Toplevel):
         ttk.Label(top, text='fills the fields below', foreground='#777777').pack(
             side='left', padx=(8, 0))
 
-        # A scrolling body: the mosaic alone has nine settings, each with a
+        # A scrolling body: the mosaic alone has thirteen settings, each with a
         # paragraph, and a window tall enough for all of it would not fit on a
         # laptop screen.
         body = ttk.Frame(self)
@@ -1637,7 +1708,11 @@ class ProcessingDialog(tk.Toplevel):
         self.bind('<Destroy>', lambda _e: canvas.unbind_all('<MouseWheel>'))
 
         self.vars = {}
+        section = ''
         for param in PARAMS[group]:
+            if param.section != section:
+                section = param.section
+                self._add_heading(inner, *SECTIONS[section])
             self._add_param(inner, param, choice['values'].get(param.key,
                                                                param.default))
 
@@ -1739,6 +1814,14 @@ class ProcessingDialog(tk.Toplevel):
         # The values are left exactly as they are: deleting a name should not
         # silently change what is about to be run.
         self._reload_presets(CUSTOM)
+
+    def _add_heading(self, parent, title, explain):
+        """A rule, a title and a paragraph between one section and the next."""
+        ttk.Separator(parent, orient='horizontal').pack(fill='x', pady=(18, 8))
+        ttk.Label(parent, text=title, font=('TkDefaultFont', 11, 'bold')).pack(
+            anchor='w')
+        ttk.Label(parent, text=explain, wraplength=638, justify='left',
+                  foreground='#555555').pack(anchor='w', pady=(4, 0))
 
     def _add_param(self, parent, param, value):
         frame = ttk.Frame(parent)
@@ -3116,6 +3199,10 @@ class LocationGUI(tk.Tk):
             if make_substrate and not local_substrate:
                 log("WARNING: no substrate raster came out of PINGMapper - skipping that layer.")
             cmd += ['--sonar'] + use_sonar if use_sonar else ['--sonar']
+            if use_sonar:
+                # How overlapping passes are judged. Applied at the merge, so
+                # these go here and never to the decode.
+                cmd += flags_for('mosaic', processing['mosaic']['values'], 'quality')
             cmd += ['--substrate', use_substrate]
             if rock_raster:
                 cmd += ['--rock', rock_raster]

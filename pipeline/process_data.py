@@ -27,7 +27,6 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import rasterio
 from rasterio.crs import CRS
-from rasterio.merge import merge as rasterio_merge
 from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 
@@ -957,6 +956,31 @@ def usable_mosaics(tif_paths: list) -> list:
 SONAR_PLATEAU_END = 0.6     # past this the return weakens and the footprint grows
 SONAR_FAR_FLOOR = 0.35      # what the outermost ground range is still worth
 SONAR_QUALITY_CELL_M = 1.0  # quality varies over metres, not pixels
+
+# How wide the poor zone under the boat is, per metre of height above the
+# bottom. Slant-range correction turns a sample at slant range s into ground
+# range g = sqrt(s^2 - h^2), so one slant sample is stretched over 1/sin(theta)
+# of ground, theta being the angle off vertical: 1.4x at g = h, 2.2x at h/2,
+# 4.1x at h/4. 1.0 puts the edge at 45 degrees, where that stretch drops under
+# root two. A transducer tilted further down sees texture closer in and wants
+# less; one that leaves a wide dark band under the boat wants more.
+SONAR_NADIR_PER_DEPTH = 1.0
+# Depth sets the nadir width ping by ping, smoothed along the pass first: a
+# running median over this many pings, so one bad bottom pick does not notch
+# the scores.
+SONAR_DEPTH_WINDOW_PINGS = 51
+
+# Working memory the merge holds at once, however large the survey: it works
+# through the output a window at a time and never holds the whole grid.
+SONAR_MERGE_BUDGET_MB = 512
+SONAR_MERGE_BLOCK = 512     # output tile size; windows are whole multiples of it
+# What the merge holds per pixel of its window: the winning value, score and
+# pass (7 bytes), one pass's read and validity (2), its score and the
+# interpolation temporaries behind it (~25), and the quality grid that is
+# interpolated from - at most a quarter the window's pixel count, at ~80 bytes
+# a cell (20).
+SONAR_MERGE_BYTES_PER_PX = 56
+
 # Blending is off. The reasoning below is kept because the idea is sound and
 # the implementation worked; what failed was the premise.
 #
@@ -992,7 +1016,8 @@ SONAR_QUALITY_CELL_M = 1.0  # quality varies over metres, not pixels
 
 def transect_tracks(meta_csv: str, log=print) -> dict:
     """
-    Where the boat was on each pass, from PINGMapper's own ping metadata.
+    Where the boat was on each pass, and what each ping could see, from
+    PINGMapper's own ping metadata.
 
     With any track filter set, PINGMapper mosaics per transect - one file per
     continuous run of pings that survived the filter - and numbers the transects
@@ -1000,35 +1025,69 @@ def transect_tracks(meta_csv: str, log=print) -> dict:
     trackline of mosaic i, which is what lets a pixel be turned back into a
     ground range from the boat that recorded it.
 
-    Returns {transect: {points (N,2) in the mosaic CRS, depth, max_range}}.
+    Nadir and range are kept per ping rather than as one figure for the pass. A
+    pass that runs from 3 m of water into 12 m has a nadir zone four times as
+    wide at one end as the other, and a range changed mid-pass moves where the
+    far field starts; a pass-wide median got both wrong for most of the pass.
+    Each pixel takes the figures of the ping its ground range is measured from.
+
+    max_range is the slant range the unit was set to. The mosaics have the
+    water column removed and are in ground range, where that reach is
+    sqrt(range^2 - depth^2).
+
+    Returns {transect: {points (N,2) in the mosaic CRS, tree over them,
+    nadir (N,) and far (N,) in metres, reach - the furthest far}}.
     """
-    import pandas as pd
+    from scipy.spatial import cKDTree
 
     df = pd.read_csv(meta_csv)
     missing = {"transect", "e", "n", "max_range"} - set(df.columns)
     if missing:
         raise KeyError(f"{os.path.basename(meta_csv)} has no {sorted(missing)} column(s)")
+    # PINGMapper's own bottom pick where it made one, the unit's otherwise.
+    depth_col = next((c for c in ("dep_m", "inst_dep_m") if c in df.columns), None)
+    order = next((c for c in ("time_s", "record_num") if c in df.columns), None)
 
-    tracks = {}
+    tracks, summary = {}, []
     for transect, group in df.groupby("transect"):
+        group = group.dropna(subset=["e", "n"])
+        if group.empty:
+            continue
+        if order:
+            group = group.sort_values(order)
+        if depth_col:
+            # 0 and below are failed picks, not depths: the median steps over
+            # them, and a run too long for it is filled from either side.
+            depth = group[depth_col].where(group[depth_col] > 0)
+            depth = (depth.rolling(SONAR_DEPTH_WINDOW_PINGS, center=True, min_periods=1)
+                     .median().interpolate(limit_direction="both")
+                     .fillna(0.0).to_numpy(dtype=float))
+        else:
+            depth = np.zeros(len(group))
+        slant = group["max_range"].fillna(group["max_range"].median()).to_numpy(dtype=float)
+        far = np.nan_to_num(np.sqrt(np.maximum(slant ** 2 - depth ** 2, 0.0)))
+        points = np.column_stack((group["e"].to_numpy(dtype=float),
+                                  group["n"].to_numpy(dtype=float)))
         tracks[int(transect)] = {
-            "points": np.column_stack((group["e"].to_numpy(dtype=float),
-                                       group["n"].to_numpy(dtype=float))),
-            "depth": (float(group["inst_dep_m"].median())
-                      if "inst_dep_m" in group else 0.0),
-            "max_range": float(group["max_range"].max()),
+            "points": points,
+            "tree": cKDTree(points),
+            "nadir": depth * SONAR_NADIR_PER_DEPTH,
+            "far": far,
+            "reach": float(far.max()),
         }
-    summary = ", ".join(f"#{t} {len(v['points']):,} pings @{v['max_range']:.0f} m"
-                        for t, v in sorted(tracks.items())[:4])
-    log(f"      {len(tracks)} transect(s): {summary}"
-        + (" ..." if len(tracks) > 4 else ""))
+        summary.append(f"#{int(transect)} {len(points):,} pings "
+                       f"{depth.min():.1f}-{depth.max():.1f} m deep "
+                       f"@{np.nanmax(slant):.0f} m")
+    log(f"      {len(tracks)} transect(s): {', '.join(summary[:4])}"
+        + (" ..." if len(summary) > 4 else ""))
     return tracks
 
 
-def sonar_quality(ground_range, nadir_m: float, max_range_m: float):
+def sonar_quality(ground_range, nadir_m, max_range_m):
     """
     How far to trust a side-scan pixel sitting `ground_range` metres off its own
-    trackline. 0 = only if nothing else covers this ground, 1 = the good part.
+    trackline. Near 0 = only if nothing else covers this ground, 1 = the good
+    part.
 
     Side scan is poor under the boat and poor at the far edge and good in
     between, so this is a ramp, a plateau and a decline:
@@ -1039,84 +1098,118 @@ def sonar_quality(ground_range, nadir_m: float, max_range_m: float):
                         specular rather than textural. Scored 0..1 across the
                         zone rather than 0 outright, because it is poor data
                         and not absent data: it still has to be able to win
-                        where no other pass covers that ground at all.
+                        where no other pass covers that ground at all - which
+                        is also why right under the boat scores just above 0
+                        rather than at it.
       to 0.6 of range   The good part - grazing angle low enough to throw
                         readable shadows, footprint still small.
       beyond that       Declines to SONAR_FAR_FLOOR at max range: weaker
                         return, bigger footprint, more noise.
 
-    nadir_m is the water depth, because that is the ground range at which the
-    sea floor first appears; anything nearer was water column.
+    nadir_m and max_range_m are each a number or an array matching
+    ground_range, so every pixel can carry the figures of its own ping. See
+    SONAR_NADIR_PER_DEPTH for how depth becomes a nadir width.
     """
     r = np.asarray(ground_range, dtype="float32")
-    nadir = max(float(nadir_m), 0.5)
-    far = max(float(max_range_m), nadir * 2.0)
+    nadir = np.maximum(np.asarray(nadir_m, dtype="float32"), 0.5)
+    far = np.maximum(np.asarray(max_range_m, dtype="float32"), nadir * 2.0)
     plateau = far * SONAR_PLATEAU_END
 
-    q = np.ones_like(r)
-    near = r < nadir
-    q[near] = r[near] / nadir
-    outer = r > plateau
-    q[outer] = 1.0 - (1.0 - SONAR_FAR_FLOOR) * np.clip(
-        (r[outer] - plateau) / max(far - plateau, 1e-3), 0.0, 1.0)
-    return q
+    # far is at least twice nadir, so the plateau starts past the nadir zone
+    # and the ramp and the decline never overlap: the lower of the two is
+    # whichever one applies.
+    ramp = np.clip(r / nadir, 1e-3, 1.0)
+    decline = 1.0 - (1.0 - SONAR_FAR_FLOOR) * np.clip(
+        (r - plateau) / np.maximum(far - plateau, 1e-3), 0.0, 1.0)
+    return np.minimum(ramp, decline).astype("float32")
 
 
-def _quality_raster(src, track):
+def quality_cell(res_m: float) -> float:
     """
-    Quality over one mosaic's extent, on a coarse grid.
+    The quality grid's cell for a mosaic of res_m metres a pixel.
 
-    Solved at metre scale and looked up per pixel rather than solved per pixel:
-    a KD-tree query for each of a hundred million pixels costs minutes and buys
-    nothing, because ground range does not change appreciably within a metre.
-
-    Returns (quality, west, north, cell) so a pixel can be indexed into it.
+    A metre, unless the mosaic is coarser than half that: the grid then follows
+    the pixels, so it is never more than a quarter their count and its memory
+    stays inside what SONAR_MERGE_BYTES_PER_PX allows for it.
     """
-    from scipy.spatial import cKDTree
-
-    west, south, east, north = src.bounds
-    cell = SONAR_QUALITY_CELL_M
-    cols = max(2, int(math.ceil((east - west) / cell)))
-    rows = max(2, int(math.ceil((north - south) / cell)))
-    xs = west + (np.arange(cols) + 0.5) * cell
-    ys = north - (np.arange(rows) + 0.5) * cell
-    mesh_x, mesh_y = np.meshgrid(xs, ys)
-    distance, _ = cKDTree(track["points"]).query(
-        np.column_stack((mesh_x.ravel(), mesh_y.ravel())), k=1)
-    quality = sonar_quality(distance, track["depth"], track["max_range"])
-    return quality.reshape(rows, cols), west, north, cell
+    return max(SONAR_QUALITY_CELL_M, 2.0 * float(res_m))
 
 
-def quality_at(quality, q_west, q_north, cell, xs, ys):
+def quality_for(track, xs, ys, cell: float):
     """
-    Look a block's pixels up in the coarse quality grid, interpolating.
+    Quality of every pixel centred at xs (columns) by ys (rows) for one pass.
 
-    Nearest-neighbour here is what put a staircase in the seam. Quality is
-    solved on a 1 m grid and the chart is 0.019 m/px, so rounding to the
-    nearest cell quantises the boundary between two passes into 53-pixel
-    treads - and a pixel one tread over gets handed to the worse pass for no
-    reason but the rounding.
+    Solved on a coarse grid and interpolated per pixel rather than solved per
+    pixel: a KD-tree query for each of a hundred million pixels costs minutes
+    and buys nothing, because ground range does not change appreciably within
+    a metre. Each grid cell takes the nadir and range of the ping nearest it,
+    the same ping its ground range is measured from.
 
-    Interpolating moves no pixel value and averages no look: the winner is
-    still one pass's sample, untouched. It only puts the boundary where the
-    two scores genuinely cross, instead of where the grid happened to fall.
+    The grid is anchored at the CRS origin rather than at any raster's corner,
+    so a pixel scores the same whichever window it is read in. The merge works
+    a window at a time, and a grid that moved with the windows would put a
+    seam at every window edge.
 
-    The grid is separable - one row index per row, one column index per
-    column - so this is four outer-product gathers rather than a resample.
+    Interpolating rather than taking the nearest cell is what keeps the seam
+    between two passes smooth. The chart is 0.019 m/px, so rounding to the
+    nearest 1 m cell quantises the boundary into 53-pixel treads - and a pixel
+    one tread over gets handed to the worse pass for no reason but the
+    rounding. Interpolating moves no pixel value and averages no look: the
+    winner is still one pass's sample, untouched. It only puts the boundary
+    where the two scores genuinely cross.
     """
-    rows, cols = quality.shape
-    fr = np.clip((q_north - ys) / cell - 0.5, 0, rows - 1)
-    fc = np.clip((xs - q_west) / cell - 0.5, 0, cols - 1)
-    r0 = np.floor(fr).astype(int)
-    c0 = np.floor(fc).astype(int)
-    r1 = np.minimum(r0 + 1, rows - 1)
-    c1 = np.minimum(c0 + 1, cols - 1)
+    fx = np.asarray(xs, dtype=float) / cell - 0.5
+    fy = np.asarray(ys, dtype=float) / cell - 0.5
+    i0, j0 = int(np.floor(fx.min())), int(np.floor(fy.min()))
+    # One cell past the last floor on each axis, so every pixel has a cell on
+    # both sides of it and nothing is clamped at the edge of the grid.
+    gx = (np.arange(i0, int(np.floor(fx.max())) + 2) + 0.5) * cell
+    gy = (np.arange(j0, int(np.floor(fy.max())) + 2) + 0.5) * cell
+    mesh_x, mesh_y = np.meshgrid(gx, gy)
+    # Cells beyond the swath score the floor whichever ping is nearest, so the
+    # tree can give up on them early. Those misses come back as distance inf
+    # and an index one past the end.
+    distance, nearest = track["tree"].query(
+        np.column_stack((mesh_x.ravel(), mesh_y.ravel())), k=1,
+        distance_upper_bound=track["reach"] + 2.0 * cell)
+    nearest = np.minimum(nearest, len(track["nadir"]) - 1)
+    grid = sonar_quality(distance, track["nadir"][nearest],
+                         track["far"][nearest]).reshape(len(gy), len(gx))
+
+    # The grid is separable - one row index per row, one column index per
+    # column - so this is four outer-product gathers rather than a resample.
+    fr, fc = fy - j0, fx - i0
+    r0, c0 = np.floor(fr).astype(int), np.floor(fc).astype(int)
     wr = (fr - r0).astype("float32")[:, None]
     wc = (fc - c0).astype("float32")[None, :]
-    return ((1 - wr) * (1 - wc) * quality[np.ix_(r0, c0)]
-            + (1 - wr) * wc * quality[np.ix_(r0, c1)]
-            + wr * (1 - wc) * quality[np.ix_(r1, c0)]
-            + wr * wc * quality[np.ix_(r1, c1)]).astype("float32")
+    return ((1 - wr) * (1 - wc) * grid[np.ix_(r0, c0)]
+            + (1 - wr) * wc * grid[np.ix_(r0, c0 + 1)]
+            + wr * (1 - wc) * grid[np.ix_(r0 + 1, c0)]
+            + wr * wc * grid[np.ix_(r0 + 1, c0 + 1)]).astype("float32")
+
+
+def work_windows(width: int, height: int, budget_mb: float = SONAR_MERGE_BUDGET_MB):
+    """
+    Cover a width x height grid in windows that fit the memory budget.
+
+    Full-width bands wherever a band one block high fits, because a GeoTIFF
+    stored in strips - the default - decompresses a whole strip to read any
+    part of it, and a full-width band reads each strip once where narrower
+    windows would read it once per window across. Narrower windows only when
+    the survey is too wide for that. Either way the edges fall on whole
+    blocks, so no output tile is written twice.
+    """
+    from rasterio.windows import Window
+
+    block = SONAR_MERGE_BLOCK
+    pixels = max(int(budget_mb * 2 ** 20) // SONAR_MERGE_BYTES_PER_PX, block * block)
+    if width * block <= pixels:
+        cols, rows = width, pixels // width // block * block
+    else:
+        cols, rows = pixels // block // block * block, block
+    for row in range(0, height, rows):
+        for col in range(0, width, cols):
+            yield Window(col, row, min(cols, width - col), min(rows, height - row))
 
 
 def mask_mosaics_to_plateau(tif_paths: list, out_dir: str, tracks: dict,
@@ -1157,18 +1250,20 @@ def mask_mosaics_to_plateau(tif_paths: list, out_dir: str, tracks: dict,
 
         with rasterio.open(path) as src:
             profile = src.profile.copy()
-            quality, q_west, q_north, cell = _quality_raster(src, track)
             res_x, res_y = src.res
+            cell = quality_cell(max(res_x, res_y))
             with rasterio.open(out_path, "w", **profile) as dst:
-                for _, window in src.block_windows(1):
+                for window in work_windows(src.width, src.height):
                     data = src.read(1, window=window)
+                    valid = data > 0
+                    if not valid.any():
+                        dst.write(data, 1, window=window)
+                        continue
                     ys = src.bounds.top - (np.arange(
                         window.row_off, window.row_off + data.shape[0]) + 0.5) * res_y
                     xs = src.bounds.left + (np.arange(
                         window.col_off, window.col_off + data.shape[1]) + 0.5) * res_x
-                    q = quality_at(quality, q_west, q_north, cell, xs, ys)
-                    valid = data > 0
-                    keep = valid & (q >= min_quality)
+                    keep = valid & (quality_for(track, xs, ys, cell) >= min_quality)
                     seen_total += int(valid.sum())
                     kept_total += int(keep.sum())
                     dst.write(np.where(keep, data, 0).astype(data.dtype), 1,
@@ -1183,7 +1278,7 @@ def mask_mosaics_to_plateau(tif_paths: list, out_dir: str, tracks: dict,
 
 
 def merge_sonar_by_quality(tif_paths: list, out_tif: str, tracks: dict,
-                           log=print):
+                           log=print, budget_mb: float = SONAR_MERGE_BUDGET_MB):
     """
     Merge overlapping mosaics by quality: at each pixel, keep the look from
     the pass that saw that ground best.
@@ -1198,6 +1293,23 @@ def merge_sonar_by_quality(tif_paths: list, out_tif: str, tracks: dict,
     and on 76.4% of that overlap the best-scoring pass is not the one file
     order would have picked - differing by 54 of 255 on average.
 
+    A pass with no track in `tracks` scores 0.5 everywhere. With no tracks at
+    all every pass scores the same, the strict comparison hands each pixel to
+    the first file holding data, and that is rasterio's merge exactly - so a
+    survey without ping metadata comes through here too, rather than through
+    rasterio.merge, which builds the whole mosaic in memory.
+
+    Memory is budget_mb whatever the size of the survey. The output is worked
+    through a window at a time (see work_windows), each window written as it
+    is finished, so nothing ever spans the whole grid. Holding the winning
+    value and score for the whole grid at once costs five bytes a pixel of the
+    survey's bounding box: 27 GB for 2 km by 1 km at 0.019 m.
+
+    Each pass is read through a WarpedVRT on the output grid. Where the passes
+    share a CRS and pixel size that is a straight copy; where one does not, it
+    is still put in the right place, which placing it by rounded offset - the
+    way this used to work - did not do.
+
     There was a second mode that averaged the overlapping looks together,
     weighted by score. It is commented out above and below rather than
     deleted: the idea is sound, the code worked, and only the premise failed.
@@ -1210,92 +1322,126 @@ def merge_sonar_by_quality(tif_paths: list, out_tif: str, tracks: dict,
     further: a discrete target seen twice will thicken slightly rather than
     sharpen.
     """
+    from rasterio.vrt import WarpedVRT
+    from rasterio.warp import transform_bounds
+    from rasterio.windows import Window
+
     srcs = [rasterio.open(p) for p in tif_paths]
+    vrts = []
     try:
         res_x, res_y = srcs[0].res
         crs = srcs[0].crs
-        west = min(s.bounds.left for s in srcs)
-        north = max(s.bounds.top for s in srcs)
-        width = int(round((max(s.bounds.right for s in srcs) - west) / res_x))
-        height = int(round((north - min(s.bounds.bottom for s in srcs)) / res_y))
-        log(f"      Output grid {width:,} x {height:,} px at {res_x:.4f} m", flush=True)
+        bounds = [tuple(s.bounds) if s.crs == crs
+                  else transform_bounds(s.crs, crs, *s.bounds) for s in srcs]
+        west = min(b[0] for b in bounds)
+        north = max(b[3] for b in bounds)
+        width = int(round((max(b[2] for b in bounds) - west) / res_x))
+        height = int(round((north - min(b[1] for b in bounds)) / res_y))
+        transform = rasterio.transform.from_origin(west, north, res_x, res_y)
+        cell = quality_cell(max(res_x, res_y))
+        windows = list(work_windows(width, height, budget_mb))
+        log(f"      Output grid {width:,} x {height:,} px at {res_x:.4f} m, "
+            f"in {len(windows):,} window(s) of at most "
+            f"{windows[0].width:,} x {windows[0].height:,}", flush=True)
+        if tracks:
+            log("      best look wins", flush=True)
+            for index in range(len(srcs)):
+                if index not in tracks:
+                    log(f"      [{index+1}/{len(srcs)}] no transect {index} in the "
+                        f"metadata - scoring it flat")
+        else:
+            log("      nothing to judge the passes by - first file wins", flush=True)
 
-        # The running best value and the score that won it. Two full-grid
-        # accumulators, which is where the memory goes on a big survey.
-        # (Blending needed the same two, as a weighted sum and its weight,
-        # with best as float32.)
-        best = np.zeros((height, width), dtype="uint8")
-        best_q = np.zeros((height, width), dtype="float32")
-        log("      best look wins", flush=True)
+        # 0 is nodata in these mosaics, coming in and going out.
+        vrts = [WarpedVRT(s, crs=crs, transform=transform, width=width,
+                          height=height, resampling=Resampling.nearest,
+                          src_nodata=0, nodata=0) for s in srcs]
 
-        for index, src in enumerate(srcs):
-            track = tracks.get(index)
-            if track is None:
-                log(f"      [{index+1}/{len(srcs)}] no transect {index} in the "
-                    f"metadata - scoring it flat")
-            quality = q_west = q_north = cell = None
-            if track is not None:
-                quality, q_west, q_north, cell = _quality_raster(src, track)
+        won = np.zeros(len(srcs), dtype=np.int64)
+        pulse = Progress(len(windows), "merge windows")
+        with rasterio.open(out_tif, "w", driver="GTiff", height=height, width=width,
+                           count=1, dtype="uint8", crs=crs, transform=transform,
+                           compress="lzw", tiled=True,
+                           blockxsize=SONAR_MERGE_BLOCK, blockysize=SONAR_MERGE_BLOCK,
+                           BIGTIFF="IF_SAFER", sparse_ok=True) as dst:
+            for window in windows:
+                top, left = int(window.row_off), int(window.col_off)
+                # The running best value, the score that won it, and which
+                # pass it came from - for this window only.
+                # (Blending needed the first two as a weighted sum and its
+                # weight, with best as float32.)
+                best = np.zeros((int(window.height), int(window.width)), dtype="uint8")
+                best_q = np.zeros(best.shape, dtype="float32")
+                who = np.zeros(best.shape, dtype="uint16")
+                xs = west + (np.arange(left, left + best.shape[1]) + 0.5) * res_x
+                ys = north - (np.arange(top, top + best.shape[0]) + 0.5) * res_y
 
-            col_off = int(round((src.bounds.left - west) / res_x))
-            row_off = int(round((north - src.bounds.top) / res_y))
-            kept = 0
-            for _, window in src.block_windows(1):
-                data = src.read(1, window=window)
-                valid = data > 0
-                if not valid.any():
-                    continue
-                r0 = row_off + int(window.row_off)
-                c0 = col_off + int(window.col_off)
-                r1, c1 = r0 + data.shape[0], c0 + data.shape[1]
-                if r0 < 0 or c0 < 0 or r1 > height or c1 > width:
-                    continue
+                for index, (vrt, b) in enumerate(zip(vrts, bounds)):
+                    # Only the part of the window this pass reaches: a narrow
+                    # pass crossing a wide window costs its own area, not the
+                    # window's.
+                    c0 = max(left, int(math.floor((b[0] - west) / res_x)))
+                    c1 = min(left + best.shape[1], int(math.ceil((b[2] - west) / res_x)))
+                    r0 = max(top, int(math.floor((north - b[3]) / res_y)))
+                    r1 = min(top + best.shape[0], int(math.ceil((north - b[1]) / res_y)))
+                    if c0 >= c1 or r0 >= r1:
+                        continue
+                    data = vrt.read(1, window=Window(c0, r0, c1 - c0, r1 - r0))
+                    valid = data > 0
+                    if not valid.any():
+                        continue
+                    rows = slice(r0 - top, r1 - top)
+                    cols = slice(c0 - left, c1 - left)
 
-                if quality is None:
-                    q = np.full(data.shape, 0.5, dtype="float32")
-                else:
-                    ys = src.bounds.top - (np.arange(
-                        window.row_off, window.row_off + data.shape[0]) + 0.5) * res_y
-                    xs = src.bounds.left + (np.arange(
-                        window.col_off, window.col_off + data.shape[1]) + 0.5) * res_x
-                    q = quality_at(quality, q_west, q_north, cell, xs, ys)
+                    track = tracks.get(index)
+                    if track is None:
+                        q = np.full(data.shape, 0.5, dtype="float32")
+                    else:
+                        q = quality_for(track, xs[cols], ys[rows], cell)
 
-                view_v = best[r0:r1, c0:c1]
-                view_q = best_q[r0:r1, c0:c1]
-                # The blended alternative, kept for whoever registers the
-                # passes properly and makes averaging worth doing:
+                    view_v = best[rows, cols]
+                    view_q = best_q[rows, cols]
+                    view_w = who[rows, cols]
+                    # The blended alternative, kept for whoever registers the
+                    # passes properly and makes averaging worth doing:
+                    #
+                    #   w = np.where(valid, q ** SONAR_BLEND_POWER, 0.0).astype("float32")
+                    #   view_v += w * data
+                    #   view_q += w
+                    wins = valid & (q > view_q)
+                    view_v[wins] = data[wins]
+                    view_q[wins] = q[wins]
+                    view_w[wins] = index
+
+                # Blending divided the weighted sum by its weight here. 0 is
+                # the nodata value, so an uncovered pixel had to stay 0 and a
+                # covered one had to stay off it - rounding up into 1 rather
+                # than down to nothing, or the faintest real backscatter reads
+                # as no survey at all:
                 #
-                #   w = np.where(valid, q ** SONAR_BLEND_POWER, 0.0).astype("float32")
-                #   view_v += w * data
-                #   view_q += w
-                #   kept += int((w > 0).sum())
-                wins = valid & (q > view_q)
-                view_v[wins] = data[wins]
-                view_q[wins] = q[wins]
-                kept += int(wins.sum())
-            log(f"      [{index+1}/{len(srcs)}] "
-                f"{os.path.basename(tif_paths[index])}: "
-                f"{kept:,} px kept", flush=True)
+                #   with np.errstate(invalid="ignore", divide="ignore"):
+                #       best = np.where(best_q > 0, best / np.maximum(best_q, 1e-6), 0.0)
+                #   best = np.where(best_q > 0, np.maximum(np.rint(best), 1), 0).astype("uint8")
+
+                covered = best_q > 0
+                # A window no pass reaches is left unwritten; the file is
+                # sparse and reads it back as 0.
+                if covered.any():
+                    dst.write(best, 1, window=window)
+                    won += np.bincount(who[covered], minlength=len(srcs))
+                pulse.step()
+        pulse.finish()
     finally:
+        for v in vrts:
+            v.close()
         for s in srcs:
             s.close()
 
-    covered = int((best_q > 0).sum())
-    log(f"      {covered:,} px carry data, decided by quality rather than file order")
-    # Blending divided the weighted sum by its weight here. 0 is the nodata
-    # value, so an uncovered pixel had to stay 0 and a covered one had to stay
-    # off it - rounding up into 1 rather than down to nothing, or the faintest
-    # real backscatter reads as no survey at all:
-    #
-    #   with np.errstate(invalid="ignore", divide="ignore"):
-    #       best = np.where(best_q > 0, best / np.maximum(best_q, 1e-6), 0.0)
-    #   best = np.where(best_q > 0, np.maximum(np.rint(best), 1), 0).astype("uint8")
-
-    transform = rasterio.transform.from_origin(west, north, res_x, res_y)
-    with rasterio.open(out_tif, "w", driver="GTiff", height=height, width=width,
-                       count=1, dtype="uint8", crs=crs, transform=transform,
-                       compress="lzw") as dst:
-        dst.write(best, 1)
+    for index, path in enumerate(tif_paths):
+        log(f"      [{index+1}/{len(srcs)}] {os.path.basename(path)}: "
+            f"{int(won[index]):,} px kept")
+    how = "quality" if tracks else "file order"
+    log(f"      {int(won.sum()):,} px carry data, decided by {how}")
     log(f"      Saved: {out_tif}  ({os.path.getsize(out_tif) / 1e6:,.0f} MB)")
 
 
@@ -1324,67 +1470,35 @@ def merge_sonar(tif_paths: list, out_tif: str, meta_csv: str = ""):
             raise FileNotFoundError(f"Missing: {p}")
 
     tif_paths = usable_mosaics(tif_paths)
+    total_mb = sum(os.path.getsize(p) for p in tif_paths) / 1e6
+    print(f"      {len(tif_paths)} mosaic(s), {total_mb:,.0f} MB on disk", flush=True)
 
     # Overlapping passes: keep the better look, not the earlier file. This needs
     # the ping metadata to know where each pass ran; with no way to judge
-    # quality, the old first-file-wins merge is what is left.
+    # quality, the merge falls back to first-file-wins - through the same
+    # windowed merge, so a big survey without metadata does not run out of
+    # memory either.
+    tracks = {}
     if len(tif_paths) > 1:
         meta_csv = meta_csv or find_sonar_meta(tif_paths)
         if meta_csv:
+            print(f"      sonar quality: nadir {SONAR_NADIR_PER_DEPTH:g} x depth, "
+                  f"best to {SONAR_PLATEAU_END:g} of range, {SONAR_FAR_FLOOR:g} at "
+                  f"the edge, depth smoothed over {SONAR_DEPTH_WINDOW_PINGS} pings")
             try:
-                tracks = transect_tracks(meta_csv)
+                found = transect_tracks(meta_csv)
             except (KeyError, OSError, ValueError) as exc:
                 print(f"      ({exc} - falling back to first-file-wins)")
             else:
-                if len(tracks) >= len(tif_paths):
-                    merge_sonar_by_quality(tif_paths, out_tif, tracks)
-                    return
-                print(f"      ({len(tracks)} transects for {len(tif_paths)} mosaics "
-                      f"- cannot match them up, falling back to first-file-wins)")
+                if len(found) >= len(tif_paths):
+                    tracks = found
+                else:
+                    print(f"      ({len(found)} transects for {len(tif_paths)} mosaics "
+                          f"- cannot match them up, falling back to first-file-wins)")
         else:
             print("      (no ping metadata found - merging first-file-wins)")
 
-    total_mb = sum(os.path.getsize(p) for p in tif_paths) / 1e6
-    print(f"      {len(tif_paths)} mosaic(s), {total_mb:,.0f} MB on disk", flush=True)
-    datasets = []
-    for i, path in enumerate(tif_paths, start=1):
-        src = rasterio.open(path)
-        print(f"      [{i}/{len(tif_paths)}] {os.path.basename(path)}  "
-              f"{src.width:,} x {src.height:,} px", flush=True)
-        datasets.append(src)
-    src_crs   = datasets[0].crs
-    nodata    = datasets[0].nodata
-
-    # The union itself is one long call with nothing to report from inside it, so
-    # say what is being attempted and how long it took either side of it.
-    print("      Merging into one raster (no output until this finishes) ...", flush=True)
-    started = time.time()
-    mosaic, transform = rasterio_merge(datasets)
-    for ds in datasets:
-        ds.close()
-    print(f"      Merged: {mosaic.shape[2]:,} x {mosaic.shape[1]:,} px "
-          f"({mosaic.size / 1e6:,.0f} Mpx) in {time.time() - started:.0f}s", flush=True)
-
-    bands = mosaic.shape[0]
-
-    # Save single-band grayscale. Alpha is computed per-tile in build_sonar_mbtiles()
-    # so that averaging is done on the intensity BEFORE the alpha threshold is applied.
-    # This ensures water areas remain transparent at every zoom level.
-    gray = mosaic[0].astype(np.uint8)
-
-    print("      Writing the merged raster ...", flush=True)
-    started = time.time()
-    with rasterio.open(
-        out_tif, "w", driver="GTiff",
-        height=mosaic.shape[1], width=mosaic.shape[2],
-        count=1, dtype=np.uint8,
-        crs=src_crs, transform=transform, compress="lzw",
-    ) as dst:
-        dst.write(gray, 1)
-
-    print(f"      Saved: {out_tif}  "
-          f"({os.path.getsize(out_tif) / 1e6:,.0f} MB in {time.time() - started:.0f}s)",
-          flush=True)
+    merge_sonar_by_quality(tif_paths, out_tif, tracks)
 
 
 # ── Step 2b: Sonar MBTiles with correct per-tile alpha ────────────────────────
@@ -1652,6 +1766,18 @@ def parse_args(argv=None):
                         "Lets overlapping mosaics be merged by which pass imaged the "
                         "ground better rather than by file order; found automatically "
                         "when the mosaics sit in a PINGMapper project")
+    p.add_argument("--sonar-nadir-per-depth", type=float, default=SONAR_NADIR_PER_DEPTH,
+                   help="width of the poor strip under the boat, as a multiple of "
+                        f"the depth at each ping (default {SONAR_NADIR_PER_DEPTH})")
+    p.add_argument("--sonar-plateau-end", type=float, default=SONAR_PLATEAU_END,
+                   help="where the best part of the swath ends, as a fraction of "
+                        f"the range (default {SONAR_PLATEAU_END})")
+    p.add_argument("--sonar-far-floor", type=float, default=SONAR_FAR_FLOOR,
+                   help="what a pixel at max range scores, 0-1 "
+                        f"(default {SONAR_FAR_FLOOR})")
+    p.add_argument("--sonar-depth-window", type=int, default=SONAR_DEPTH_WINDOW_PINGS,
+                   help="pings in the running median that smooths depth before it "
+                        f"sets the nadir width (default {SONAR_DEPTH_WINDOW_PINGS})")
     p.add_argument("--substrate", default=SUBSTRATE_TIF,
                    help="substrate raster GeoTIFF; pass an empty string to skip it")
     p.add_argument("--no-tide-reduction", action="store_true",
@@ -1777,7 +1903,20 @@ def lowest_zoom(rasters: list, zoom_max: int) -> int:
 
 def main(argv=None):
     global OUT_DIR, ZOOM_MIN, ZOOM_MAX, SURVEY_TIMEZONE, CONTOUR_INTERVAL_FT, TIDE_CONSTITUENTS
+    global SONAR_NADIR_PER_DEPTH, SONAR_PLATEAU_END, SONAR_FAR_FLOOR, SONAR_DEPTH_WINDOW_PINGS
     args = parse_args(argv)
+    # Checked here rather than left to fail inside the merge, where a plateau
+    # past the edge of range shows up as nothing worse than a strange chart.
+    for ok, what in ((args.sonar_nadir_per_depth >= 0, "--sonar-nadir-per-depth must be 0 or more"),
+                     (0 < args.sonar_plateau_end < 1, "--sonar-plateau-end must be between 0 and 1"),
+                     (0 <= args.sonar_far_floor <= 1, "--sonar-far-floor must be from 0 to 1"),
+                     (args.sonar_depth_window >= 1, "--sonar-depth-window must be 1 or more")):
+        if not ok:
+            raise SystemExit(what)
+    SONAR_NADIR_PER_DEPTH = args.sonar_nadir_per_depth
+    SONAR_PLATEAU_END = args.sonar_plateau_end
+    SONAR_FAR_FLOOR = args.sonar_far_floor
+    SONAR_DEPTH_WINDOW_PINGS = args.sonar_depth_window
     OUT_DIR = args.out_dir
     ZOOM_MIN, ZOOM_MAX = args.zoom_min, args.zoom_max
     SURVEY_TIMEZONE = args.timezone
