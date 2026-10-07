@@ -160,3 +160,54 @@ means all rights reserved. Skipping either removes only its overlay.
 rest of this repository; the combination exists only on a machine where both
 are installed, and anyone redistributing the two together should read GPL-3.0
 first.
+
+## What Each Program Does
+
+| Program | Responsible for |
+| --- | --- |
+| `pipeline/add_survey_locations.py` | The build screen. Keeps the survey catalogue and each survey's processing settings (mosaic toning, sonar quality, ping filters, substrate, rock, bottom objects), and runs the build steps below in order |
+| `pipeline/any_recording.py` | Reads any recording PINGVerter supports into the shape the Recording Fixer expects |
+| `pipeline/appicon.py` | The AnchorHold icon on every desktop window |
+| `pipeline/bag_import.py` | Turns a BAG bathymetric grid into soundings the pipeline can chart |
+| `pipeline/build_preview.py` | A survey's lightweight preview, its boundary and track, shown before its charts are downloaded |
+| `pipeline/chart_bundle.py` | Packs one built survey into a single file either app can install |
+| `pipeline/depth_csv_from_sonar.py` | Runs PINGMapper on a raw recording and keeps the depth CSV, side scan mosaics and substrate rasters |
+| `pipeline/down_sonar.py` | Turns the down-looking beam into a waterfall the app scrolls along the track |
+| `pipeline/extract_constants.py` | Fits harmonic tide constants for Santa Rosalía from online predictions |
+| `pipeline/find_surveys.py` | Searches public archives for surveys this pipeline can use |
+| `pipeline/fix_recording.py` | The Recording Fixer: look over a recording and cut out what should not reach the chart |
+| `pipeline/ghost_vision.py` | Drives GhostVision to find objects on the bottom and returns them as map points |
+| `pipeline/gsf_import.py` | Turns a GSF multibeam file into soundings and a backscatter mosaic |
+| `pipeline/merge_locations.py` | Merges finished surveys into one, so their charts show together under one pin |
+| `pipeline/package_web.py` | A standalone copy of the web app for another PC |
+| `pipeline/patch_utm_zone.py` | Fixes the UTM zone bug in an installed PINGVerter/PINGMapper |
+| `pipeline/places_to_objects.py` | Turns a list of places into an objects layer the viewer imports |
+| `pipeline/process_data.py` | Builds the chart: depth grid, contours and shallow bands, the sonar merge (each overlapping pixel taken from the pass that saw it best), and the MBTiles for every layer |
+| `pipeline/release_web.py` | The zips attached to a GitHub release, with the charts split out |
+| `pipeline/repair_humminbird.py` | Rebuilds the header and ping index of a Humminbird recording cut short by a power loss |
+| `pipeline/rock_map.py` | Drives RockMapper to predict rocky habitat from the side scan mosaics |
+| `pipeline/satellite.py` | Fetches and caches the satellite imagery a survey is drawn on |
+| `pipeline/survey_source.py` | A survey's provenance - who, when, how and under what licence - shown on its pin |
+| `pipeline/tools.py` | Offers the desktop programs to the browser as a workflow checklist |
+| `pipeline/updates.py` | Checks for, and pulls, newer AnchorHold and sonar tools |
+| `pipeline/web_charts.py` | The browser app's chart library: list, add, remove, set the default |
+| `pipeline/web_server.py` | Serves the web app, reading tiles straight out of the MBTiles |
+| `pipeline/workspace.py` | Remembers where recordings and builds live, so every file dialog opens there |
+| `SurveyPlanner/survey_planner.py` | The Survey Planner window |
+| `SurveyPlanner/selftest.py` | Checks the planning engine without opening a window |
+| `SurveyPlanner/planner/plan.py` | Turns a lake outline into lines a boat can run |
+| `SurveyPlanner/planner/shoreline.py` | Where the water ends |
+| `SurveyPlanner/planner/imagery.py` | Re-derives a shoreline from satellite imagery |
+| `SurveyPlanner/planner/osmwater.py` | Water bodies from OpenStreetMap, for when the NHD service does not answer |
+| `SurveyPlanner/planner/basemap.py` | The aerial basemap behind the plan |
+| `SurveyPlanner/planner/access.py` | Shore access, and what can be seen from it |
+| `SurveyPlanner/planner/nogo.py` | Places the boat must not go |
+| `SurveyPlanner/planner/overfly.py` | Points the survey has to pass directly over |
+| `SurveyPlanner/planner/depthgrid.py` | Shallows from AnchorHold depth grids, and the chart the boat carries |
+| `SurveyPlanner/planner/humminbird.py` | Depth soundings straight out of a Humminbird recording |
+| `SurveyPlanner/planner/boat.py` | What goes to the boat with the mission: an ArduPilot fence and the chart |
+| `SurveyPlanner/planner/exporters.py` | Writes a plan out in the formats the boat and plotter take |
+| `SurveyPlanner/planner/geometry.py` | Local coordinates, in feet |
+| `SurveyPlanner/planner/__init__.py` | Marks the planning engine as a package |
+| `object-detection/shadow_pair.py` | A classical detector that pairs a target's bright return with its shadow in side scan |
+| `object-detection/test_synth.py` | Runs that detector over a synthetic sonar scene |
